@@ -1,0 +1,11 @@
+{
+  "title": "Academic City Timetabling & Examination Portal",
+  "description": "A secure university portal for Academic City students, lecturers, and administrators to sign in and access timetables, courses, exams, and scheduling tools.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
