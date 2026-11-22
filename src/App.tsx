@@ -2221,6 +2221,65 @@ function WeeklyTimetableGrid({
   );
 }
 
+function getTimetableExportGridWidth(grid: HTMLElement) {
+  const template = grid.style.gridTemplateColumns;
+  const timeColumnWidth = Number.parseFloat(/^([\d.]+)px/.exec(template)?.[1] ?? "");
+  const dayColumnWidths = [...template.matchAll(/minmax\(([\d.]+)px,/g)].map((match) =>
+    Number.parseFloat(match[1]),
+  );
+  if (!Number.isFinite(timeColumnWidth) || dayColumnWidths.length === 0) {
+    throw new Error("The timetable grid dimensions could not be calculated.");
+  }
+
+  const computedStyle = window.getComputedStyle(grid);
+  const columnGap = Number.parseFloat(computedStyle.columnGap) || 0;
+  const borderWidth =
+    (Number.parseFloat(computedStyle.borderLeftWidth) || 0) +
+    (Number.parseFloat(computedStyle.borderRightWidth) || 0);
+  const minimumWidth = grid.classList.contains("has-saturday") ? 1040 : 920;
+  const tracksWidth =
+    timeColumnWidth +
+    dayColumnWidths.reduce((total, width) => total + width, 0) +
+    columnGap * dayColumnWidths.length +
+    borderWidth;
+
+  return Math.ceil(Math.max(minimumWidth, tracksWidth));
+}
+
+function applyDesktopTimetableExportStyles(element: HTMLElement) {
+  const toolbar = element.querySelector<HTMLElement>(".timetable-toolbar");
+  if (!toolbar) return;
+
+  Object.assign(toolbar.style, {
+    minHeight: "54px",
+    padding: "10px 18px",
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: "16px",
+    background: "#fafafa",
+    borderColor: "#000000",
+  });
+
+  const toolbarHeading = toolbar.querySelector<HTMLElement>("div:first-child");
+  if (toolbarHeading) {
+    Object.assign(toolbarHeading.style, { width: "auto", gap: "3px" });
+  }
+
+  const heading = toolbar.querySelector<HTMLElement>("strong");
+  heading?.style.setProperty("font-size", "14px", "important");
+  if (heading) {
+    heading.style.lineHeight = "normal";
+  }
+
+  const subtitle = toolbar.querySelector<HTMLElement>("span");
+  subtitle?.style.setProperty("font-size", "11.5px", "important");
+
+  const toolbarActions = toolbar.querySelector<HTMLElement>(".timetable-toolbar-actions");
+  toolbarActions?.style.setProperty("display", "flex", "important");
+}
+
+
 async function createTimetablePng(element: HTMLElement) {
   const grid =
     element.querySelector<HTMLElement>(".timetable-scroll-wrapper--desktop .timetable-grid") ||
@@ -2231,7 +2290,7 @@ async function createTimetablePng(element: HTMLElement) {
 
   await document.fonts.ready;
 
-  const contentWidth = Math.ceil(Math.max(element.clientWidth, grid.scrollWidth));
+  const contentWidth = getTimetableExportGridWidth(grid);
   const sidePadding = 24;
   const width = contentWidth + sidePadding * 2;
   const host = document.createElement("div");
@@ -2244,6 +2303,7 @@ async function createTimetablePng(element: HTMLElement) {
     clone.querySelector<HTMLElement>(".timetable-scroll-wrapper");
 
   clone.classList.add("is-png-export");
+  applyDesktopTimetableExportStyles(clone);
   host.setAttribute("aria-hidden", "true");
   Object.assign(host.style, {
     position: "fixed",
@@ -2254,6 +2314,7 @@ async function createTimetablePng(element: HTMLElement) {
   });
   Object.assign(clone.style, {
     width: `${width}px`,
+    maxWidth: "none",
     padding: `${sidePadding}px`,
     boxSizing: "border-box",
     backgroundColor: "#ffffff",
@@ -2262,9 +2323,11 @@ async function createTimetablePng(element: HTMLElement) {
   if (cloneGrid) {
     cloneGrid.style.width = `${contentWidth}px`;
     cloneGrid.style.minWidth = `${contentWidth}px`;
+    cloneGrid.style.maxWidth = "none";
   }
   if (scrollWrapper) {
     scrollWrapper.style.width = `${contentWidth}px`;
+    scrollWrapper.style.maxWidth = "none";
     scrollWrapper.style.overflow = "visible";
   }
 
