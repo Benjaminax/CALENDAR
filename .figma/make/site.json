@@ -1,8 +1,14 @@
 {
   "title": "Academic City Timetabling & Examination Portal",
-  "description": "A secure university portal for Academic City students, lecturers, and administrators to sign in and access timetables, courses, exams, and scheduling tools.",
+  "description": "Academic City University timetables, academic calendar, course catalogue, and examination scheduling portal.",
   "robots": {
     "index": false
+  },
+  "icons": {
+    "icon": "/academic-city-favicon.png"
+  },
+  "openGraph": {
+    "image": "/academic-city-social-preview.png"
   },
   "accessibility": {
     "addBypassLinks": false,

@@ -1,2 +1,5 @@
 # AgentPlat packages this default favicon directly from source without LFS hydration.
 favicon.png -filter -diff -merge -text
+
+# Static site images must be stored as real files for Vercel deployments.
+*.png -filter -diff -merge -text
