@@ -2032,22 +2032,18 @@ async function downloadOrShareFile(blob: Blob, filename: string, mimeType: strin
   }, 5000);
 }
 
-async function createTimetablePng(element: HTMLElement) {
-  const grid =
-    element.querySelector<HTMLElement>(".timetable-scroll-wrapper--desktop .timetable-grid") ||
-    element.querySelector<HTMLElement>(".timetable-grid");
-  if (!grid) {
-    throw new Error("The timetable grid could not be found.");
-  }
-
-  await document.fonts.ready;
-
+async function createTimetablePng(element: HTMLElement): Promise<string> {
   const isSaturday =
-    grid.classList.contains("has-saturday") ||
-    element.querySelector(".has-saturday") !== null;
-  const contentWidth = Math.ceil(Math.max(element.clientWidth, grid.scrollWidth));
+    element.querySelector(".has-saturday") !== null ||
+    element.querySelector(".timetable-grid.has-saturday") !== null;
+  const numDays = isSaturday ? 6 : 5;
+
+  // True desktop full-size dimensions: 92px time col + 160px per day col minimum
+  const contentWidth = isSaturday ? 1060 : 920;
   const sidePadding = 24;
   const width = contentWidth + sidePadding * 2;
+
+  await document.fonts.ready;
 
   // Clone element to prepare a pure desktop-resolution snapshot
   const clone = element.cloneNode(true) as HTMLElement;
@@ -2055,7 +2051,7 @@ async function createTimetablePng(element: HTMLElement) {
   // Remove all mobile-specific elements to ensure zero interference with the desktop export
   clone
     .querySelectorAll(
-      ".mobile-tt-controls, .mobile-tt-day-view, .mobile-tt-compact-week-view, .mobile-tt-agenda-view, .mobile-agenda, .timetable-export-tip"
+      ".mobile-tt-controls, .mobile-tt-day-picker, .mobile-tt-day-view, .mobile-tt-compact-week-view, .mobile-tt-agenda-view, .mobile-agenda, .timetable-export-tip"
     )
     .forEach((node) => node.remove());
 
@@ -2066,64 +2062,75 @@ async function createTimetablePng(element: HTMLElement) {
     cloneScrollWrapper?.querySelector<HTMLElement>(".timetable-grid") ||
     clone.querySelector<HTMLElement>(".timetable-grid");
 
+  if (!cloneGrid) {
+    throw new Error("The timetable grid could not be found.");
+  }
+
+  // CRUCIAL: Unwrap cloneGrid out of cloneScrollWrapper.
+  // Scroll wrappers have `overflow-x: auto; max-width: 100%` on mobile which clips the
+  // timetable at mobile screen width (390px). Removing the wrapper allows the grid to render full width!
+  if (cloneScrollWrapper && cloneScrollWrapper.contains(cloneGrid)) {
+    cloneScrollWrapper.replaceWith(cloneGrid);
+  }
+
   clone.classList.add("is-png-export");
   if (isSaturday) {
     clone.classList.add("has-saturday");
+    cloneGrid.classList.add("has-saturday");
   }
 
+  applyDesktopTimetableExportStyles(clone);
+
+  // Force explicit desktop dimensions and column tracks on the clone grid
+  cloneGrid.style.setProperty("display", "grid", "important");
+  cloneGrid.style.setProperty(
+    "grid-template-columns",
+    `92px repeat(${numDays}, minmax(160px, 1fr))`,
+    "important"
+  );
+  cloneGrid.style.setProperty("width", `${contentWidth}px`, "important");
+  cloneGrid.style.setProperty("min-width", `${contentWidth}px`, "important");
+  cloneGrid.style.setProperty("max-width", `${contentWidth}px`, "important");
+  cloneGrid.style.setProperty("overflow", "visible", "important");
 
   // Force desktop dimensions on the clone root
+  clone.style.setProperty("display", "block", "important");
   clone.style.setProperty("width", `${width}px`, "important");
   clone.style.setProperty("min-width", `${width}px`, "important");
-  clone.style.setProperty("max-width", "none", "important");
+  clone.style.setProperty("max-width", `${width}px`, "important");
   clone.style.setProperty("padding", `${sidePadding}px`, "important");
   clone.style.setProperty("box-sizing", "border-box", "important");
   clone.style.setProperty("background-color", "#ffffff", "important");
   clone.style.setProperty("overflow", "visible", "important");
-  clone.style.setProperty("display", "block", "important");
 
-  // Force desktop dimensions on the desktop wrapper and grid
-  if (cloneScrollWrapper) {
-    cloneScrollWrapper.style.setProperty("display", "block", "important");
-    cloneScrollWrapper.style.setProperty("width", `${contentWidth}px`, "important");
-    cloneScrollWrapper.style.setProperty("min-width", `${contentWidth}px`, "important");
-    cloneScrollWrapper.style.setProperty("max-width", "none", "important");
-    cloneScrollWrapper.style.setProperty("overflow", "visible", "important");
-  }
-
-  if (cloneGrid) {
-    cloneGrid.style.setProperty("display", "grid", "important");
-    cloneGrid.style.setProperty("width", `${contentWidth}px`, "important");
-    cloneGrid.style.setProperty("min-width", `${contentWidth}px`, "important");
-    cloneGrid.style.setProperty("max-width", "none", "important");
-    cloneGrid.style.setProperty("overflow", "visible", "important");
-    if (!cloneGrid.style.gridTemplateColumns || cloneGrid.style.gridTemplateColumns.includes("36px")) {
-      const numDays = isSaturday ? 6 : 5;
-      cloneGrid.style.setProperty(
-        "grid-template-columns",
-        `92px repeat(${numDays}, minmax(160px, 1fr))`,
-        "important"
-      );
-    }
-  }
-
-  // Mount host inside viewport bounds at z-index -9999 so WebKit's GPU rasterizer
-  // does not cull it (avoiding off-screen left: -100000px clipping bugs on mobile).
+  // Mount host inside document.documentElement as position: absolute with overflow: visible
+  // at z-index -9999 so it is never clipped by mobile screen width or fixed-layer bounds.
   const host = document.createElement("div");
+  host.id = "timetable-export-host";
   host.setAttribute("aria-hidden", "true");
   Object.assign(host.style, {
-    position: "fixed",
+    position: "absolute",
     top: "0",
     left: "0",
     width: `${width}px`,
+    minWidth: `${width}px`,
+    maxWidth: "none",
     height: "auto",
     zIndex: "-9999",
     pointerEvents: "none",
-    overflow: "hidden",
+    overflow: "visible",
+    backgroundColor: "#ffffff",
   });
 
   host.appendChild(clone);
-  document.body.appendChild(host);
+
+  // Temporarily allow document to overflow horizontally during the snapshot
+  const prevHtmlOverflowX = document.documentElement.style.overflowX;
+  const prevBodyOverflowX = document.body.style.overflowX;
+  document.documentElement.style.overflowX = "visible";
+  document.body.style.overflowX = "visible";
+
+  document.documentElement.appendChild(host);
 
   try {
     const height = Math.max(
@@ -2143,12 +2150,14 @@ async function createTimetablePng(element: HTMLElement) {
         width: `${width}px`,
         height: `${height}px`,
         minWidth: `${width}px`,
-        maxWidth: "none",
+        maxWidth: `${width}px`,
         overflow: "visible",
       },
     });
   } finally {
     host.remove();
+    document.documentElement.style.overflowX = prevHtmlOverflowX;
+    document.body.style.overflowX = prevBodyOverflowX;
   }
 }
 
@@ -2158,24 +2167,11 @@ async function downloadTimetablePng(element: HTMLElement, filename: string) {
   await downloadOrShareFile(blob, filename, "image/png");
 }
 
-async function printTimetablePng(element: HTMLElement, printWindow: Window, title: string) {
+async function downloadTimetablePdf(element: HTMLElement, filename: string) {
   const dataUrl = await createTimetablePng(element);
-  printWindow.document.open();
-  printWindow.document.write(`<!doctype html>
-    <html>
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-          @page { size: A4 landscape; margin: 5mm; }
-          html, body { width: 100%; height: 200mm; margin: 0; padding: 0; }
-          body { display: grid; place-items: center; overflow: hidden; }
-          img { display: block; width: 100%; height: 100%; object-fit: contain; }
-        </style>
-      </head>
-      <body><img alt="${title}" src="${dataUrl}"></body>
-    </html>`);
-  printWindow.document.close();
-  printWindow.document.title = title;
+  const image = new Image();
+  image.src = dataUrl;
+  await image.decode();
 
   const { jsPDF } = await import("jspdf");
   const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4", compress: true });
@@ -2253,28 +2249,17 @@ function TimetablePdfButton({
   const handleExport = async () => {
     const target = targetRef.current;
     if (!target) {
-      console.error("Could not print timetable PDF: timetable element is unavailable.");
+      console.error("Could not download timetable PDF: timetable element is unavailable.");
       showAppNotification("The timetable PDF could not be created. Please try again.", "error");
-      return;
-    }
-
-    const printWindow = window.open("", "_blank");
-    if (!printWindow) {
-      showAppNotification(
-        "Your browser blocked the PDF print window. Allow pop-ups and try again.",
-        "error",
-      );
       return;
     }
 
     setIsExporting(true);
     try {
-      const title = filename.replace(/\.pdf$/i, "").replace(/-/g, " ");
-      await printTimetablePng(target, printWindow, title);
+      await downloadTimetablePdf(target, filename);
       showAppNotification("PDF timetable exported successfully!", "info");
     } catch (error) {
-      console.error("Failed to print timetable as PDF.", error);
-      printWindow.close();
+      console.error("Failed to download timetable as PDF.", error);
       showAppNotification("The timetable PDF could not be created. Please try again.", "error");
     } finally {
       setIsExporting(false);
