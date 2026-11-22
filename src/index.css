@@ -2150,10 +2150,12 @@ button:disabled {
 .timetable-pdf-source {
   position: fixed;
   top: 0;
-  left: -10000px;
-  z-index: -1;
+  left: 0;
+  z-index: -9999;
   width: 1440px;
   pointer-events: none;
+  opacity: 0;
+  overflow: hidden;
 }
 .timetable-next {
   margin-bottom: 24px;
@@ -4173,14 +4175,34 @@ button:disabled {
     display: none !important;
   }
 
+  .timetable-shell.is-png-export {
+    width: auto !important;
+    max-width: none !important;
+    min-width: 0 !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    display: block !important;
+  }
+
   .timetable-shell.is-png-export .timetable-scroll-wrapper--desktop {
     display: block !important;
+    width: auto !important;
+    max-width: none !important;
+    overflow: visible !important;
+  }
+
+  .timetable-shell.is-png-export .timetable-grid {
+    display: grid !important;
+    max-width: none !important;
+    overflow: visible !important;
   }
 
   .timetable-shell.is-png-export .mobile-tt-controls,
   .timetable-shell.is-png-export .mobile-tt-day-view,
   .timetable-shell.is-png-export .mobile-tt-compact-week-view,
-  .timetable-shell.is-png-export .mobile-tt-agenda-view {
+  .timetable-shell.is-png-export .mobile-tt-agenda-view,
+  .timetable-shell.is-png-export .mobile-agenda,
+  .timetable-shell.is-png-export .timetable-export-tip {
     display: none !important;
   }
 

@@ -1,32 +1,6 @@
 import React, { useState, useMemo, useRef, useEffect, FormEvent } from "react";
 import { createPortal } from "react-dom";
 import { toPng } from "html-to-image";
-import {
-  AcademicSemesterCalendar,
-  AcademicSemesterName,
-  AcademicCalendarEntry,
-  CalendarAudience,
-  createEmptySemesterCalendar,
-  formatCalendarEntryDate,
-  getSemesterCalendarEntries,
-  getSemesterCalendarKey,
-  getUpcomingCalendarEntries,
-  loadActiveAcademicTerm,
-  loadSemesterCalendar,
-  saveActiveAcademicTerm,
-  saveSemesterCalendar,
-} from "./lib/academicCalendar";
-import {
-  AcademicCalendarManager,
-  AcademicCalendarView,
-} from "./components/AcademicCalendarWorkspace";
-import { loadOrSeedDemoDataset, saveDemoDataset } from "./lib/demoDataset";
-import type { DemoStudentRecord } from "./lib/demoDataset";
-import { ACADEMIC_PROGRAMMES, type Programme } from "./lib/academicProgrammes";
-import {
-  findClassroomTimeConflict,
-  getClassroomTimeConflicts,
-} from "./lib/timetableConflicts";
 
 const AcademicCatalogueBrowser = React.lazy(() =>
   import("./components/AcademicCatalogueBrowser").then(({ AcademicCatalogueBrowser }) => ({
@@ -41,7 +15,7 @@ const AcademicCatalogueBrowser = React.lazy(() =>
 export type Role = "Student" | "Teacher" | "Admin";
 type Status = "idle" | "loading";
 
-export type { Programme } from "./lib/academicProgrammes";
+export type Programme = "CS" | "CE" | "EE" | "ME" | "BA";
 export type AcademicLevel = "100" | "200" | "300" | "400";
 export type IntakeCohort = "Cohort 1 (Sept)" | "Cohort 2 (Jan)" | "Both";
 type Level100Cohort = Exclude<IntakeCohort, "Both">;
@@ -92,8 +66,6 @@ export interface CourseData {
   code: string;
   title: string;
   department: string;
-  programme?: Programme;
-  level?: AcademicLevel;
   credits: number;
   lectureHours: number;
   labHours: number;
@@ -144,244 +116,14 @@ const timeSlots = [
   "17:20 - 18:20",
 ];
 
-const icsEncoder = new TextEncoder();
-
-function escapeIcsText(value: string) {
-  return value
-    .replace(/\\/g, "\\\\")
-    .replace(/\r\n|\r|\n/g, "\\n")
-    .replace(/,/g, "\\,")
-    .replace(/;/g, "\\;");
-}
-
-function foldIcsLine(line: string) {
-  let folded = "";
-  let byteLength = 0;
-
-  for (const character of line) {
-    const characterLength = icsEncoder.encode(character).length;
-    if (byteLength + characterLength > 75) {
-      folded += "\r\n ";
-      byteLength = 1;
-    }
-    folded += character;
-    byteLength += characterLength;
-  }
-
-  return folded;
-}
-
-function getFirstScheduleDate(day: number, hour: number, minute: number, semesterStart: string) {
-  const [year, month, date] = semesterStart.split("-").map(Number);
-  const candidate = new Date(Date.UTC(year, month - 1, date, hour, minute));
-  const targetWeekday = (day + 1) % 7;
-  const daysUntil = (targetWeekday - candidate.getUTCDay() + 7) % 7;
-  candidate.setUTCDate(candidate.getUTCDate() + daysUntil);
-  return candidate;
-}
-
-function formatIcsDate(date: Date) {
-  return date.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
-}
-
-function formatIcsDay(date: Date) {
-  return date.toISOString().slice(0, 10).replace(/-/g, "");
-}
-
-function toUtcDate(value: string) {
-  return new Date(`${value}T00:00:00Z`);
-}
-
-function addUtcDays(date: Date, count: number) {
-  const result = new Date(date);
-  result.setUTCDate(result.getUTCDate() + count);
-  return result;
-}
-
-function getNextAcademicYear(academicYear: string) {
-  const match = /^(\d{4})\/\d{2}$/.exec(academicYear);
-  if (!match) throw new Error("Academic year must use YYYY/YY format.");
-  const nextStartYear = Number(match[1]) + 1;
-  return `${nextStartYear}/${String(nextStartYear + 1).slice(-2)}`;
-}
-
-function getExcludedClassDates(
-  day: number,
-  firstClass: Date,
-  semesterEnd: Date,
-  startHour: number,
-  startMinute: number,
-  entries: AcademicCalendarEntry[],
-  audience: Exclude<CalendarAudience, "All">,
-) {
-  const blockedEntries = entries.filter(
-    (entry) =>
-      ["Holiday", "Mid-semester break", "Vacate"].includes(entry.type) &&
-      (entry.audience === "All" || entry.audience === audience),
-  );
-  const excludedDates: string[] = [];
-  const date = new Date(firstClass);
-  const targetWeekday = (day + 1) % 7;
-
-  while (date <= semesterEnd) {
-    const dateString = formatIcsDay(date);
-    const isoDate = `${dateString.slice(0, 4)}-${dateString.slice(4, 6)}-${dateString.slice(6, 8)}`;
-    if (
-      date.getUTCDay() === targetWeekday &&
-      blockedEntries.some((entry) => entry.startDate <= isoDate && entry.endDate >= isoDate)
-    ) {
-      const exception = new Date(date);
-      exception.setUTCHours(startHour, startMinute, 0, 0);
-      excludedDates.push(formatIcsDate(exception));
-    }
-    date.setUTCDate(date.getUTCDate() + 1);
-  }
-
-  return excludedDates;
-}
-
-function downloadCalendarIcs(
-  events: TimetableEvent[],
-  entries: AcademicCalendarEntry[],
-  calendar: AcademicSemesterCalendar,
-  audience: Exclude<CalendarAudience, "All">,
-  filename: string,
-  calendarName: string,
-) {
-  if (!calendar.startDate || !calendar.endDate) {
-    throw new Error("Set semester start and end dates in the admin calendar before exporting.");
-  }
-  if (events.length === 0 && entries.length === 0) {
-    throw new Error("There are no classes or calendar events to export.");
-  }
-
-  const semesterStart = toUtcDate(calendar.startDate);
-  const semesterEnd = toUtcDate(calendar.endDate);
-  if (
-    Number.isNaN(semesterStart.getTime()) ||
-    Number.isNaN(semesterEnd.getTime()) ||
-    semesterStart > semesterEnd
-  ) {
-    throw new Error("The semester dates are invalid.");
-  }
-  const recurrenceEnd = new Date(semesterEnd);
-  recurrenceEnd.setUTCHours(23, 59, 59, 0);
-  const stamp = formatIcsDate(new Date());
-  const lines = [
-    "BEGIN:VCALENDAR",
-    "VERSION:2.0",
-    "PRODID:-//Academic City University//Timetable//EN",
-    "CALSCALE:GREGORIAN",
-    "METHOD:PUBLISH",
-    `X-WR-CALNAME:${escapeIcsText(calendarName)}`,
-    "X-WR-TIMEZONE:Africa/Accra",
-  ];
-
-  events.forEach((event) => {
-    const slot = timeSlots[event.start];
-    if (!slot) return;
-
-    const [startTime, startMinute] = slot.split(" - ")[0].split(":").map(Number);
-    const lastSlot = timeSlots[
-      Math.min(event.start + Math.max(event.span, 1) - 1, timeSlots.length - 1)
-    ];
-    const endTime = lastSlot?.split(" - ")[1];
-    if (endTime === undefined) return;
-
-    const [endHour, endMinute] = endTime.split(":").map(Number);
-    const start = getFirstScheduleDate(event.day, startTime, startMinute, calendar.startDate);
-    if (start > recurrenceEnd) return;
-    const end = new Date(start);
-    end.setUTCHours(endHour, endMinute, 0, 0);
-
-    const dayCode = ["MO", "TU", "WE", "TH", "FR", "SA"][event.day];
-    if (!dayCode) return;
-
-    const details = [
-      event.person ? `Instructor: ${event.person}` : "",
-      event.type,
-      event.group && event.group !== "All" ? event.group : "",
-      event.cohort && event.cohort !== "Both" ? event.cohort : "",
-    ].filter(Boolean);
-    const uid = event.id.replace(/[^A-Za-z0-9._-]/g, "-");
-
-    lines.push(
-      "BEGIN:VEVENT",
-      `UID:${uid}@calendar.academiccity.edu.gh`,
-      `DTSTAMP:${stamp}`,
-      `DTSTART:${formatIcsDate(start)}`,
-      `DTEND:${formatIcsDate(end)}`,
-      `RRULE:FREQ=WEEKLY;BYDAY=${dayCode};UNTIL=${formatIcsDate(recurrenceEnd)}`,
-      ...getExcludedClassDates(
-        event.day,
-        start,
-        recurrenceEnd,
-        startTime,
-        startMinute,
-        entries,
-        audience,
-      ).map((date) => `EXDATE:${date}`),
-      `SUMMARY:${escapeIcsText(`${event.code} - ${event.title}`)}`,
-      ...(details.length > 0 ? [`DESCRIPTION:${escapeIcsText(details.join(" · "))}`] : []),
-      `LOCATION:${escapeIcsText(event.onlineMeeting ? ONLINE_MEETING_ROOM : event.room)}`,
-      "STATUS:CONFIRMED",
-      "END:VEVENT",
-    );
-  });
-
-  entries
-    .filter((entry) => entry.audience === "All" || entry.audience === audience)
-    .forEach((entry) => {
-      const start = toUtcDate(entry.startDate);
-      const end = toUtcDate(entry.endDate);
-      if (end < semesterStart || start > semesterEnd) return;
-
-      const clippedStart = start < semesterStart ? semesterStart : start;
-      const clippedEnd = end > semesterEnd ? semesterEnd : end;
-      const uid = entry.id.replace(/[^A-Za-z0-9._-]/g, "-");
-      const details = [entry.description, entry.type].filter(Boolean).join(" · ");
-
-      if (entry.startTime && entry.endTime) {
-        const eventStart = new Date(`${entry.startDate}T${entry.startTime}:00Z`);
-        const eventEnd = new Date(`${entry.endDate}T${entry.endTime}:00Z`);
-        lines.push(
-          "BEGIN:VEVENT",
-          `UID:${uid}@calendar.academiccity.edu.gh`,
-          `DTSTAMP:${stamp}`,
-          `DTSTART:${formatIcsDate(eventStart)}`,
-          `DTEND:${formatIcsDate(eventEnd)}`,
-          `SUMMARY:${escapeIcsText(entry.title)}`,
-          ...(details ? [`DESCRIPTION:${escapeIcsText(details)}`] : []),
-          "STATUS:CONFIRMED",
-          "END:VEVENT",
-        );
-      } else {
-        const exclusiveEnd = addUtcDays(clippedEnd, 1);
-        lines.push(
-          "BEGIN:VEVENT",
-          `UID:${uid}@calendar.academiccity.edu.gh`,
-          `DTSTAMP:${stamp}`,
-          `DTSTART;VALUE=DATE:${formatIcsDay(clippedStart)}`,
-          `DTEND;VALUE=DATE:${formatIcsDay(exclusiveEnd)}`,
-          `SUMMARY:${escapeIcsText(entry.title)}`,
-          ...(details ? [`DESCRIPTION:${escapeIcsText(details)}`] : []),
-          "STATUS:CONFIRMED",
-          "END:VEVENT",
-        );
-      }
-    });
-
-  lines.push("END:VCALENDAR");
-  const content = `${lines.map(foldIcsLine).join("\r\n")}\r\n`;
-  const url = URL.createObjectURL(new Blob([content], { type: "text/calendar;charset=utf-8" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+const ghanaHolidays = [
+  { name: "Independence Day", date: "06 Mar 2026", day: "Friday", type: "Statutory" },
+  { name: "Eid al-Fitr", date: "31 Mar 2026", day: "Tuesday", type: "Religious" },
+  { name: "Good Friday", date: "18 Apr 2026", day: "Friday", type: "Statutory" },
+  { name: "Easter Monday", date: "21 Apr 2026", day: "Monday", type: "Statutory" },
+  { name: "Workers' Day (May Day)", date: "01 May 2026", day: "Friday", type: "Statutory" },
+  { name: "African Union Day", date: "25 May 2026", day: "Monday", type: "Commemorative" },
+];
 
 const initialFaculty: FacultyMember[] = [
   {
@@ -832,7 +574,7 @@ const initialMasterEvents: TimetableEvent[] = [
     room: "A3",
     day: 2,
     start: 2,
-    span: 2, // 10:20 - 12:30
+    span: 1, // 10:20 - 11:20
     major: "CS",
     level: "400",
     semester: 2,
@@ -972,38 +714,6 @@ const initialMasterEvents: TimetableEvent[] = [
     cohort: "Both",
     type: "Lecture",
   },
-  {
-    id: "demo-sem1-cs4134-lecture",
-    code: "CS4134",
-    title: "Human-Computer Interaction",
-    person: "Kwesi Crankson",
-    room: "L3",
-    day: 0,
-    start: 0,
-    span: 2,
-    major: "CS",
-    level: "400",
-    semester: 1,
-    group: "All",
-    cohort: "Both",
-    type: "Lecture",
-  },
-  {
-    id: "demo-sem1-cs4134-practical",
-    code: "CS4134",
-    title: "Human-Computer Interaction",
-    person: "Kwesi Crankson",
-    room: "Computer Lab 1",
-    day: 2,
-    start: 5,
-    span: 2,
-    major: "CS",
-    level: "400",
-    semester: 1,
-    group: "All",
-    cohort: "Both",
-    type: "Practical",
-  },
 ];
 
 const initialCourses: CourseData[] = [
@@ -1120,7 +830,6 @@ const departmentOptions = Array.from(
   new Set([
     ...initialFaculty.map((member) => member.department),
     ...initialCourses.map((course) => course.department),
-    ...ACADEMIC_PROGRAMMES.map((programme) => programme.department),
   ]),
 ).sort((a, b) => a.localeCompare(b));
 
@@ -1161,20 +870,6 @@ function normalizeCourseIdentifier(value: string) {
   return value.toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
-function getCourseRecordKey(
-  course: Pick<
-    CourseData,
-    "code" | "title" | "programme" | "level"
-  >,
-) {
-  return [
-    normalizeCourseIdentifier(course.code),
-    course.programme ?? "",
-    course.level ?? "",
-    normalizeCourseIdentifier(course.title),
-  ].join(":");
-}
-
 function HighlightedCourseName({ name, query }: { name: string; query: string }) {
   const search = query.trim().toLowerCase();
   if (!search) return <>{name}</>;
@@ -1206,9 +901,6 @@ function getCourseWeeklySessions(course: CourseData) {
 }
 
 function eventMatchesCourse(event: TimetableEvent, course: CourseData) {
-  if (course.programme && event.major !== "ALL" && course.programme !== event.major) return false;
-  if (course.level && course.level !== event.level) return false;
-
   const eventCode = normalizeCourseIdentifier(event.code);
   const courseCode = normalizeCourseIdentifier(course.code);
   if (courseCode.length >= 6 && eventCode.includes(courseCode)) return true;
@@ -1226,32 +918,10 @@ function getElectiveCourseForEvent(event: TimetableEvent, courses: CourseData[])
 
 function findCourseForEvent(event: TimetableEvent, courses: CourseData[]) {
   const eventCode = normalizeCourseIdentifier(event.code);
-  const matchingCourses = courses.filter((course) => {
+  return courses.find((course) => {
     const courseCode = normalizeCourseIdentifier(course.code);
     return courseCode.length >= 6 && (eventCode === courseCode || eventCode.includes(courseCode));
   });
-  return (
-    matchingCourses.find(
-      (course) => course.programme === event.major && course.level === event.level,
-    ) ??
-    matchingCourses.find((course) => course.programme === event.major && !course.level) ??
-    matchingCourses.find(
-      (course) => !course.programme && (!course.level || course.level === event.level),
-    ) ??
-    matchingCourses[0]
-  );
-}
-
-function examMatchesCourse(exam: ExamEntry, course: CourseData) {
-  const matchesCode =
-    normalizeCourseIdentifier(exam.code) === normalizeCourseIdentifier(course.code);
-  const matchesTitle =
-    normalizeCourseIdentifier(exam.title) === normalizeCourseIdentifier(course.title);
-  return (
-    (matchesCode || matchesTitle) &&
-    (!course.programme || exam.major === "ALL" || exam.major === course.programme) &&
-    (!course.level || exam.level === course.level)
-  );
 }
 
 function getAssignedGroupForMajor(
@@ -1348,7 +1018,6 @@ function getAvailableScheduleSuggestions({
         events.some(
           (other) =>
             other.id !== event.id &&
-            other.semester === event.semester &&
             other.person === event.person &&
             other.day === day &&
             Math.max(other.start, slot) < Math.min(other.start + (other.span || 1), end),
@@ -1360,7 +1029,6 @@ function getAvailableScheduleSuggestions({
           (other) =>
             other.id !== event.id &&
             !other.onlineMeeting &&
-            other.semester === event.semester &&
             other.day === day &&
             other.room === room.code &&
             Math.max(other.start, slot) < Math.min(other.start + (other.span || 1), end),
@@ -1699,6 +1367,22 @@ function getTrackElectiveEvents(
 const trackCoreCourseCodes = ["CS4134", "CS4132", "AI/CS/IT4192"];
 
 const trackCoreEventsSemester1: TimetableEvent[] = [
+  {
+    id: "demo-core-cs4134-sem1",
+    code: "CS4134",
+    title: "Human-Computer Interaction",
+    person: "Kwesi Crankson",
+    room: "L3",
+    day: 0,
+    start: 0,
+    span: 2,
+    major: "CS",
+    level: "400",
+    semester: 1,
+    group: "All",
+    cohort: "Both",
+    type: "Lecture",
+  },
   {
     id: "demo-core-cs4132-sem1",
     code: "CS4132",
@@ -2222,28 +1906,36 @@ function WeeklyTimetableGrid({
 }
 
 function getTimetableExportGridWidth(grid: HTMLElement) {
-  const template = grid.style.gridTemplateColumns;
-  const timeColumnWidth = Number.parseFloat(/^([\d.]+)px/.exec(template)?.[1] ?? "");
-  const dayColumnWidths = [...template.matchAll(/minmax\(([\d.]+)px,/g)].map((match) =>
-    Number.parseFloat(match[1]),
-  );
-  if (!Number.isFinite(timeColumnWidth) || dayColumnWidths.length === 0) {
-    throw new Error("The timetable grid dimensions could not be calculated.");
+  const isSaturday =
+    grid.classList.contains("has-saturday") ||
+    grid.closest(".timetable-shell")?.querySelector(".has-saturday") !== null;
+  const minimumWidth = isSaturday ? 1040 : 920;
+
+  try {
+    const template = grid.style.gridTemplateColumns;
+    const timeColumnWidth = Number.parseFloat(/^([\d.]+)px/.exec(template)?.[1] ?? "");
+    const dayColumnWidths = [...template.matchAll(/minmax\(([\d.]+)px,/g)].map((match) =>
+      Number.parseFloat(match[1]),
+    );
+    if (!Number.isFinite(timeColumnWidth) || dayColumnWidths.length === 0) {
+      return minimumWidth;
+    }
+
+    const computedStyle = window.getComputedStyle(grid);
+    const columnGap = Number.parseFloat(computedStyle.columnGap) || 1;
+    const borderWidth =
+      (Number.parseFloat(computedStyle.borderLeftWidth) || 1) +
+      (Number.parseFloat(computedStyle.borderRightWidth) || 1);
+    const tracksWidth =
+      timeColumnWidth +
+      dayColumnWidths.reduce((total, width) => total + width, 0) +
+      columnGap * dayColumnWidths.length +
+      borderWidth;
+
+    return Math.ceil(Math.max(minimumWidth, tracksWidth));
+  } catch {
+    return minimumWidth;
   }
-
-  const computedStyle = window.getComputedStyle(grid);
-  const columnGap = Number.parseFloat(computedStyle.columnGap) || 0;
-  const borderWidth =
-    (Number.parseFloat(computedStyle.borderLeftWidth) || 0) +
-    (Number.parseFloat(computedStyle.borderRightWidth) || 0);
-  const minimumWidth = grid.classList.contains("has-saturday") ? 1040 : 920;
-  const tracksWidth =
-    timeColumnWidth +
-    dayColumnWidths.reduce((total, width) => total + width, 0) +
-    columnGap * dayColumnWidths.length +
-    borderWidth;
-
-  return Math.ceil(Math.max(minimumWidth, tracksWidth));
 }
 
 function applyDesktopTimetableExportStyles(element: HTMLElement) {
@@ -2279,6 +1971,66 @@ function applyDesktopTimetableExportStyles(element: HTMLElement) {
   toolbarActions?.style.setProperty("display", "flex", "important");
 }
 
+function dataUrlToBlob(dataUrl: string): Blob {
+  const parts = dataUrl.split(",");
+  const mime = parts[0].match(/:(.*?);/)?.[1] || "image/png";
+  const binary = atob(parts[1]);
+  const array = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    array[i] = binary.charCodeAt(i);
+  }
+  return new Blob([array], { type: mime });
+}
+
+async function downloadOrShareFile(blob: Blob, filename: string, mimeType: string) {
+  const isIos =
+    typeof navigator !== "undefined" &&
+    (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+      (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1));
+
+  // 1. Native Web Share API on iOS devices (iPhone, iPad):
+  // iOS Safari ignores the HTML5 <a download> attribute on data & blob URIs.
+  // navigator.share with a File object brings up the native iOS action sheet:
+  // "Save Image" (saves directly to Photos) or "Save to Files" (saves to iCloud / Files app).
+  if (isIos && typeof navigator !== "undefined" && navigator.canShare) {
+    try {
+      const file = new File([blob], filename, { type: mimeType });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: filename,
+        });
+        return;
+      }
+    } catch (error: any) {
+      if (error?.name === "AbortError") {
+        return; // User cancelled the iOS share dialog
+      }
+      console.warn("navigator.share was not completed, falling back to download link", error);
+    }
+  }
+
+  // 2. Standard Blob Download (Android, Windows PC, Mac, Linux):
+  // Generates a blob URL and dispatches click on an anchor appended to document.body
+  const blobUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = blobUrl;
+  link.download = filename;
+  link.rel = "noopener";
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+
+  // 3. Fallback for iOS if Web Share failed: open blob URL in new tab for user to save
+  if (isIos) {
+    window.open(blobUrl, "_blank");
+  }
+
+  setTimeout(() => {
+    link.remove();
+    URL.revokeObjectURL(blobUrl);
+  }, 5000);
+}
 
 async function createTimetablePng(element: HTMLElement) {
   const grid =
@@ -2290,61 +2042,108 @@ async function createTimetablePng(element: HTMLElement) {
 
   await document.fonts.ready;
 
-  const contentWidth = getTimetableExportGridWidth(grid);
+  const isSaturday =
+    grid.classList.contains("has-saturday") ||
+    element.querySelector(".has-saturday") !== null;
+  const contentWidth = Math.ceil(Math.max(element.clientWidth, grid.scrollWidth));
   const sidePadding = 24;
   const width = contentWidth + sidePadding * 2;
-  const host = document.createElement("div");
+
+  // Clone element to prepare a pure desktop-resolution snapshot
   const clone = element.cloneNode(true) as HTMLElement;
-  const cloneGrid =
-    clone.querySelector<HTMLElement>(".timetable-scroll-wrapper--desktop .timetable-grid") ||
-    clone.querySelector<HTMLElement>(".timetable-grid");
-  const scrollWrapper =
+
+  // Remove all mobile-specific elements to ensure zero interference with the desktop export
+  clone
+    .querySelectorAll(
+      ".mobile-tt-controls, .mobile-tt-day-view, .mobile-tt-compact-week-view, .mobile-tt-agenda-view, .mobile-agenda, .timetable-export-tip"
+    )
+    .forEach((node) => node.remove());
+
+  const cloneScrollWrapper =
     clone.querySelector<HTMLElement>(".timetable-scroll-wrapper--desktop") ||
     clone.querySelector<HTMLElement>(".timetable-scroll-wrapper");
+  const cloneGrid =
+    cloneScrollWrapper?.querySelector<HTMLElement>(".timetable-grid") ||
+    clone.querySelector<HTMLElement>(".timetable-grid");
 
   clone.classList.add("is-png-export");
-  applyDesktopTimetableExportStyles(clone);
+  if (isSaturday) {
+    clone.classList.add("has-saturday");
+  }
+
+
+  // Force desktop dimensions on the clone root
+  clone.style.setProperty("width", `${width}px`, "important");
+  clone.style.setProperty("min-width", `${width}px`, "important");
+  clone.style.setProperty("max-width", "none", "important");
+  clone.style.setProperty("padding", `${sidePadding}px`, "important");
+  clone.style.setProperty("box-sizing", "border-box", "important");
+  clone.style.setProperty("background-color", "#ffffff", "important");
+  clone.style.setProperty("overflow", "visible", "important");
+  clone.style.setProperty("display", "block", "important");
+
+  // Force desktop dimensions on the desktop wrapper and grid
+  if (cloneScrollWrapper) {
+    cloneScrollWrapper.style.setProperty("display", "block", "important");
+    cloneScrollWrapper.style.setProperty("width", `${contentWidth}px`, "important");
+    cloneScrollWrapper.style.setProperty("min-width", `${contentWidth}px`, "important");
+    cloneScrollWrapper.style.setProperty("max-width", "none", "important");
+    cloneScrollWrapper.style.setProperty("overflow", "visible", "important");
+  }
+
+  if (cloneGrid) {
+    cloneGrid.style.setProperty("display", "grid", "important");
+    cloneGrid.style.setProperty("width", `${contentWidth}px`, "important");
+    cloneGrid.style.setProperty("min-width", `${contentWidth}px`, "important");
+    cloneGrid.style.setProperty("max-width", "none", "important");
+    cloneGrid.style.setProperty("overflow", "visible", "important");
+    if (!cloneGrid.style.gridTemplateColumns || cloneGrid.style.gridTemplateColumns.includes("36px")) {
+      const numDays = isSaturday ? 6 : 5;
+      cloneGrid.style.setProperty(
+        "grid-template-columns",
+        `92px repeat(${numDays}, minmax(160px, 1fr))`,
+        "important"
+      );
+    }
+  }
+
+  // Mount host inside viewport bounds at z-index -9999 so WebKit's GPU rasterizer
+  // does not cull it (avoiding off-screen left: -100000px clipping bugs on mobile).
+  const host = document.createElement("div");
   host.setAttribute("aria-hidden", "true");
   Object.assign(host.style, {
     position: "fixed",
-    left: "-100000px",
     top: "0",
-    zIndex: "-1",
-    pointerEvents: "none",
-  });
-  Object.assign(clone.style, {
+    left: "0",
     width: `${width}px`,
-    maxWidth: "none",
-    padding: `${sidePadding}px`,
-    boxSizing: "border-box",
-    backgroundColor: "#ffffff",
-    overflow: "visible",
+    height: "auto",
+    zIndex: "-9999",
+    pointerEvents: "none",
+    overflow: "hidden",
   });
-  if (cloneGrid) {
-    cloneGrid.style.width = `${contentWidth}px`;
-    cloneGrid.style.minWidth = `${contentWidth}px`;
-    cloneGrid.style.maxWidth = "none";
-  }
-  if (scrollWrapper) {
-    scrollWrapper.style.width = `${contentWidth}px`;
-    scrollWrapper.style.maxWidth = "none";
-    scrollWrapper.style.overflow = "visible";
-  }
 
   host.appendChild(clone);
-  (element.parentElement ?? document.body).appendChild(host);
+  document.body.appendChild(host);
 
   try {
-    const height = Math.ceil(clone.scrollHeight);
+    const height = Math.max(
+      Math.ceil(clone.scrollHeight),
+      Math.ceil(clone.offsetHeight),
+      Math.ceil(clone.getBoundingClientRect().height),
+      680
+    );
+
     return await toPng(clone, {
       backgroundColor: "#ffffff",
       cacheBust: true,
-      pixelRatio: 1,
+      pixelRatio: 2, // 2x ensures sharp, publication-grade text
       width,
       height,
       style: {
         width: `${width}px`,
         height: `${height}px`,
+        minWidth: `${width}px`,
+        maxWidth: "none",
         overflow: "visible",
       },
     });
@@ -2355,32 +2154,43 @@ async function createTimetablePng(element: HTMLElement) {
 
 async function downloadTimetablePng(element: HTMLElement, filename: string) {
   const dataUrl = await createTimetablePng(element);
-  const link = document.createElement("a");
-  link.download = filename;
-  link.href = dataUrl;
-  link.click();
+  const blob = dataUrlToBlob(dataUrl);
+  await downloadOrShareFile(blob, filename, "image/png");
 }
 
-async function downloadTimetablePdf(element: HTMLElement, filename: string) {
+async function printTimetablePng(element: HTMLElement, printWindow: Window, title: string) {
   const dataUrl = await createTimetablePng(element);
-  const image = new Image();
-  image.src = dataUrl;
-  await image.decode();
+  printWindow.document.open();
+  printWindow.document.write(`<!doctype html>
+    <html>
+      <head>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+          @page { size: A4 landscape; margin: 5mm; }
+          html, body { width: 100%; height: 200mm; margin: 0; padding: 0; }
+          body { display: grid; place-items: center; overflow: hidden; }
+          img { display: block; width: 100%; height: 100%; object-fit: contain; }
+        </style>
+      </head>
+      <body><img alt="${title}" src="${dataUrl}"></body>
+    </html>`);
+  printWindow.document.close();
+  printWindow.document.title = title;
 
   const { jsPDF } = await import("jspdf");
   const pdf = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4", compress: true });
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
-  const margin = 5;
-  const scale = Math.min(
-    (pageWidth - margin * 2) / image.naturalWidth,
-    (pageHeight - margin * 2) / image.naturalHeight,
-  );
+  const margin = 8;
+  const availWidth = pageWidth - margin * 2;
+  const availHeight = pageHeight - margin * 2;
+  const scale = Math.min(availWidth / image.naturalWidth, availHeight / image.naturalHeight);
   const width = image.naturalWidth * scale;
   const height = image.naturalHeight * scale;
 
   pdf.addImage(dataUrl, "PNG", (pageWidth - width) / 2, (pageHeight - height) / 2, width, height);
-  pdf.save(filename);
+  const pdfBlob = pdf.output("blob");
+  await downloadOrShareFile(pdfBlob, filename, "application/pdf");
 }
 
 function TimetablePngButton({
@@ -2403,6 +2213,7 @@ function TimetablePngButton({
     setIsExporting(true);
     try {
       await downloadTimetablePng(target, filename);
+      showAppNotification("PNG timetable exported successfully!", "info");
     } catch (error) {
       console.error("Failed to export timetable as PNG.", error);
       showAppNotification("The timetable PNG could not be created. Please try again.", "error");
@@ -2442,16 +2253,28 @@ function TimetablePdfButton({
   const handleExport = async () => {
     const target = targetRef.current;
     if (!target) {
-      console.error("Could not download timetable PDF: timetable element is unavailable.");
+      console.error("Could not print timetable PDF: timetable element is unavailable.");
       showAppNotification("The timetable PDF could not be created. Please try again.", "error");
+      return;
+    }
+
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      showAppNotification(
+        "Your browser blocked the PDF print window. Allow pop-ups and try again.",
+        "error",
+      );
       return;
     }
 
     setIsExporting(true);
     try {
-      await downloadTimetablePdf(target, filename);
+      const title = filename.replace(/\.pdf$/i, "").replace(/-/g, " ");
+      await printTimetablePng(target, printWindow, title);
+      showAppNotification("PDF timetable exported successfully!", "info");
     } catch (error) {
-      console.error("Failed to download timetable as PDF.", error);
+      console.error("Failed to print timetable as PDF.", error);
+      printWindow.close();
       showAppNotification("The timetable PDF could not be created. Please try again.", "error");
     } finally {
       setIsExporting(false);
@@ -2468,55 +2291,6 @@ function TimetablePdfButton({
       title="Print the timetable image to PDF"
     >
       <Icon name={iconName} /> {isExporting ? "Preparing PDF..." : label}
-    </button>
-  );
-}
-
-function CalendarDownloadButton({
-  events,
-  calendarEntries,
-  calendar,
-  audience,
-  filename,
-  calendarName,
-  label = "Download .ics",
-}: {
-  events: TimetableEvent[];
-  calendarEntries: AcademicCalendarEntry[];
-  calendar: AcademicSemesterCalendar;
-  audience: Exclude<CalendarAudience, "All">;
-  filename: string;
-  calendarName: string;
-  label?: string;
-}) {
-  const handleDownload = () => {
-    try {
-      downloadCalendarIcs(events, calendarEntries, calendar, audience, filename, calendarName);
-      showAppNotification(
-        `${filename} downloaded. Open it in Apple Calendar or import it into Google Calendar. Classes repeat through ${calendar.endDate}.`,
-        "success",
-      );
-    } catch (error) {
-      console.error("Failed to export schedule as an iCalendar file.", error);
-      showAppNotification("The calendar file could not be created. Please try again.", "error");
-    }
-  };
-
-  return (
-    <button
-      type="button"
-      onClick={handleDownload}
-      disabled={
-        (!calendar.startDate || !calendar.endDate) ||
-        (events.length === 0 && calendarEntries.length === 0)
-      }
-      title={
-        !calendar.startDate || !calendar.endDate
-          ? "Set semester start and end dates in Admin → Calendar first."
-          : undefined
-      }
-    >
-      {label} <Icon name="download-04" />
     </button>
   );
 }
@@ -2719,11 +2493,11 @@ function Header({
   const activeTerm = term || "Semester 1 · 2025/26";
   const initials = userName
     ? userName
-        .split(/\s+/)
-        .map((part) => part[0])
-        .join("")
-        .slice(0, 2)
-        .toUpperCase()
+      .split(/\s+/)
+      .map((part) => part[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase()
     : meta.initials;
 
   useEffect(() => {
@@ -3147,18 +2921,8 @@ function AdminPortal({
   setElectiveTracks,
   exams,
   setExams,
-  academicYear,
-  setAcademicYear,
   currentSemester,
   setCurrentSemester,
-  academicCalendar,
-  calendarEntries,
-  calendarLoading,
-  calendarError,
-  onSaveAcademicCalendar,
-  demoStudentCount,
-  demoDataLoading,
-  demoDataError,
   saturdayEnabled,
   setSaturdayEnabled,
   onLogout,
@@ -3178,18 +2942,8 @@ function AdminPortal({
   setElectiveTracks: React.Dispatch<React.SetStateAction<ElectiveTrack[]>>;
   exams: ExamEntry[];
   setExams: React.Dispatch<React.SetStateAction<ExamEntry[]>>;
-  academicYear: string;
-  setAcademicYear: React.Dispatch<React.SetStateAction<string>>;
   currentSemester: "Semester 1" | "Semester 2";
   setCurrentSemester: React.Dispatch<React.SetStateAction<"Semester 1" | "Semester 2">>;
-  academicCalendar: AcademicSemesterCalendar;
-  calendarEntries: AcademicCalendarEntry[];
-  calendarLoading: boolean;
-  calendarError: string | null;
-  onSaveAcademicCalendar: (calendar: AcademicSemesterCalendar) => Promise<void>;
-  demoStudentCount: number;
-  demoDataLoading: boolean;
-  demoDataError: string | null;
   saturdayEnabled: boolean;
   setSaturdayEnabled: React.Dispatch<React.SetStateAction<boolean>>;
   onLogout: () => void;
@@ -3270,7 +3024,7 @@ function AdminPortal({
     semester: "1" | "2";
   } | null>(null);
   const [courseSearch, setCourseSearch] = useState("");
-  const [editingLecturerKey, setEditingLecturerKey] = useState<string | null>(null);
+  const [editingLecturerCode, setEditingLecturerCode] = useState<string | null>(null);
   const [lecturerDraft, setLecturerDraft] = useState("");
   const [trackCourseSelections, setTrackCourseSelections] = useState<Record<string, string>>({});
   const adminElectiveCourses = useMemo(() => {
@@ -3296,13 +3050,8 @@ function AdminPortal({
   const [rolloverSuccess, setRolloverSuccess] = useState(false);
 
   // Academic Calendar & System Rules state
+  const [academicYear, setAcademicYear] = useState("2025/26");
   const [teachingWeeks, setTeachingWeeks] = useState(14);
-  const academicYearStart = Number(academicYear.slice(0, 4));
-  const firstAcademicYear = Number.isFinite(academicYearStart) ? academicYearStart - 1 : 2025;
-  const academicYearOptions = Array.from({ length: 6 }, (_, index) => {
-    const startYear = firstAcademicYear + index;
-    return `${startYear}/${String(startYear + 1).slice(-2)}`;
-  });
   const [cohortOneEnabled, setCohortOneEnabled] = useState(true);
   const [cohortTwoEnabled, setCohortTwoEnabled] = useState(true);
   const [minSessionDurationEnforced, setMinSessionDurationEnforced] = useState(true);
@@ -3373,7 +3122,24 @@ function AdminPortal({
 
   // Calculate Timetable Health Gauge: (Conflict-Free / Total) * 100%
   const totalSessions = events.length;
-  const conflictCount = useMemo(() => getClassroomTimeConflicts(events).length, [events]);
+  // Detected conflicts check
+  const conflictCount = useMemo(() => {
+    let conflicts = 0;
+    for (let i = 0; i < events.length; i++) {
+      for (let j = i + 1; j < events.length; j++) {
+        const a = events[i];
+        const b = events[j];
+        if (a.day === b.day && a.room === b.room && !a.onlineMeeting && !b.onlineMeeting) {
+          const aEnd = a.start + (a.span || 1);
+          const bEnd = b.start + (b.span || 1);
+          if (Math.max(a.start, b.start) < Math.min(aEnd, bEnd)) {
+            conflicts++;
+          }
+        }
+      }
+    }
+    return conflicts;
+  }, [events]);
 
   const conflictFreeSessions = Math.max(0, totalSessions - conflictCount);
   const healthPercentage =
@@ -3386,7 +3152,6 @@ function AdminPortal({
   const adminNav = [
     ["Overview", "dashboard-square-01"],
     ["Timetables", "calendar-03"],
-    ["Calendar", "calendar-03"],
     ["Courses", "book-open-01"],
     ["Facilities", "building-03"],
     ["Exams", "test-tube-01"],
@@ -3483,26 +3248,19 @@ function AdminPortal({
       return;
     }
 
-    const updateTargetEvent = (e: TimetableEvent) =>
-      e.id === targetEvent.id
-        ? {
-            ...e,
-            day: newDay,
-            start: newSlot,
-            room: rescheduleOnlineMeeting ? e.room : newRoom,
-            onlineMeeting: rescheduleOnlineMeeting,
-          }
-        : e;
-    const updatedEvents = events.map(updateTargetEvent);
-    const roomConflict = findClassroomTimeConflict(updatedEvents, ONLINE_MEETING_ROOM);
-    if (roomConflict) {
-      setRescheduleError(
-        `${roomConflict.room} is double-booked by ${roomConflict.first.code} and ${roomConflict.second.code}.`,
-      );
-      return;
-    }
-
-    setEvents((previousEvents) => previousEvents.map(updateTargetEvent));
+    // Apply change
+    setEvents((prev) =>
+      prev.map((e) => {
+        if (e.id !== targetEvent.id) return e;
+        return {
+          ...e,
+          day: newDay,
+          start: newSlot,
+          room: rescheduleOnlineMeeting ? e.room : newRoom,
+          onlineMeeting: rescheduleOnlineMeeting,
+        };
+      }),
+    );
     setRescheduleError(null);
     setRescheduleModalOpen(false);
   };
@@ -3528,7 +3286,7 @@ function AdminPortal({
       span: 1,
       major: "ALL",
       level: "100",
-      semester: currentSemester === "Semester 1" ? 1 : 2,
+      semester: 1,
       type: bookingType,
     };
 
@@ -3541,16 +3299,7 @@ function AdminPortal({
       capacityOverride: bookingEnrollment,
       includeOnline: false,
     });
-  }, [
-    bookingEnrollment,
-    bookingEventName,
-    bookingType,
-    courses,
-    currentSemester,
-    events,
-    rooms,
-    saturdayEnabled,
-  ]);
+  }, [bookingEnrollment, bookingEventName, bookingType, courses, events, rooms, saturdayEnabled]);
   const isBookingSelectionAvailable = bookingScheduleSuggestions.some(
     (suggestion) =>
       suggestion.day === bookingDay &&
@@ -3602,8 +3351,6 @@ function AdminPortal({
     setBookRoomModalOpen(false);
   };
 
-  const selectedAdminSemester = currentSemester === "Semester 1" ? 1 : 2;
-
   // Filter events based on view mode
   const displayedEvents = useMemo(() => {
     if (viewMode === "programme") {
@@ -3616,22 +3363,18 @@ function AdminPortal({
               (!ev.cohort || ev.cohort === "Both" || ev.cohort === selectedCohort))),
       );
     } else if (viewMode === "lecturer") {
-      return events.filter(
-        (ev) =>
-          ev.semester === selectedAdminSemester &&
-          ev.person.toLowerCase().includes(selectedLecturer.toLowerCase()),
+      return events.filter((ev) =>
+        ev.person.toLowerCase().includes(selectedLecturer.toLowerCase()),
       );
     } else {
       return events.filter((ev) =>
-        ev.semester === selectedAdminSemester &&
-        (selectedRoom === ONLINE_MEETING_ROOM
+        selectedRoom === ONLINE_MEETING_ROOM
           ? ev.onlineMeeting
-          : !ev.onlineMeeting && ev.room === selectedRoom),
+          : !ev.onlineMeeting && ev.room === selectedRoom,
       );
     }
   }, [
     events,
-    selectedAdminSemester,
     viewMode,
     selectedMajor,
     selectedLevel,
@@ -3640,6 +3383,7 @@ function AdminPortal({
     selectedLecturer,
     selectedRoom,
   ]);
+  const selectedAdminSemester = currentSemester === "Semester 1" ? 1 : 2;
   const selectedAdminSemesterKey = selectedAdminSemester === 1 ? "semester1" : "semester2";
   const adminElectiveScope = `${selectedMajor}:${selectedLevel}:${currentSemester}`;
   const previousAdminElectiveScope = useRef(adminElectiveScope);
@@ -3648,15 +3392,15 @@ function AdminPortal({
     () =>
       selectedLevel === "400"
         ? electiveTracks.filter(
-            (track) =>
-              track.major === selectedMajor &&
-              track[selectedAdminSemesterKey].some((code) =>
-                adminElectiveCourses.some(
-                  (course) =>
-                    normalizeCourseIdentifier(course.code) === normalizeCourseIdentifier(code),
-                ),
+          (track) =>
+            track.major === selectedMajor &&
+            track[selectedAdminSemesterKey].some((code) =>
+              adminElectiveCourses.some(
+                (course) =>
+                  normalizeCourseIdentifier(course.code) === normalizeCourseIdentifier(code),
               ),
-          )
+            ),
+        )
         : [],
     [
       adminElectiveCourses,
@@ -3699,11 +3443,11 @@ function AdminPortal({
     () =>
       selectedAdminElectiveTrack
         ? getTrackElectiveEvents(
-            selectedAdminElectiveTrack,
-            adminElectiveCourses,
-            [selectedAdminElectiveTrack],
-            events,
-          ).events.filter((event) => event.semester === selectedAdminSemester)
+          selectedAdminElectiveTrack,
+          adminElectiveCourses,
+          [selectedAdminElectiveTrack],
+          events,
+        ).events.filter((event) => event.semester === selectedAdminSemester)
         : [],
     [
       adminElectiveCourses,
@@ -3733,14 +3477,14 @@ function AdminPortal({
     const fallbackCoreEvents =
       selectedAdminSemester === 1 && selectedMajor === "CS" && selectedLevel === "400"
         ? trackCoreEventsSemester1.filter(
-            (fallbackEvent) =>
-              !filteredEvents.some(
-                (event) =>
-                  event.code === fallbackEvent.code &&
-                  event.day === fallbackEvent.day &&
-                  event.start === fallbackEvent.start,
-              ),
-          )
+          (fallbackEvent) =>
+            !filteredEvents.some(
+              (event) =>
+                event.code === fallbackEvent.code &&
+                event.day === fallbackEvent.day &&
+                event.start === fallbackEvent.start,
+            ),
+        )
         : [];
     const scheduledTrackCourseCodes = new Set(
       filteredEvents.flatMap((event) =>
@@ -3769,16 +3513,11 @@ function AdminPortal({
     selectedAdminTrackEvents,
     viewMode,
   ]);
-  const selectedProgrammeName =
-    ACADEMIC_PROGRAMMES.find(
-      (programme) => programme.code === selectedMajor,
-    )?.name ?? selectedMajor;
   const programmeBaseTimetableTitle =
     selectedLevel === "100"
-      ? `${selectedProgrammeName} Level 100 Timetable · ${
-          enabledLevel100Cohorts.length > 0 ? selectedCohort : "No Cohorts Enabled"
-        }`
-      : `${selectedProgrammeName} Level ${selectedLevel} Timetable`;
+      ? `${selectedMajor} Level 100 Timetable · ${enabledLevel100Cohorts.length > 0 ? selectedCohort : "No Cohorts Enabled"
+      }`
+      : `${selectedMajor} Level ${selectedLevel} Timetable`;
   const selectedElectiveLabel = selectedAdminElectiveTrack
     ? `Elective Track: ${selectedAdminElectiveTrack.name}`
     : "Core Courses Only";
@@ -3788,12 +3527,12 @@ function AdminPortal({
   const handleExecuteSplit = (c: CourseData) => {
     setCourses((prev) =>
       prev.map((item) =>
-        getCourseRecordKey(item) === getCourseRecordKey(c)
+        item.code === c.code
           ? {
-              ...item,
-              requiresSplit: true,
-              groupAllocation: `Group A (${c.department.substring(0, 2)} - ${Math.ceil(c.enrollment * 0.55)}) & Group B (Inter-major - ${Math.floor(c.enrollment * 0.45)})`,
-            }
+            ...item,
+            requiresSplit: true,
+            groupAllocation: `Group A (${c.department.substring(0, 2)} - ${Math.ceil(c.enrollment * 0.55)}) & Group B (Inter-major - ${Math.floor(c.enrollment * 0.45)})`,
+          }
           : item,
       ),
     );
@@ -3911,10 +3650,10 @@ function AdminPortal({
         weeklySessionHours: weeklyHours === 4 ? [2, 2] : [weeklyHours],
         ...(isElective
           ? {
-              electiveTrack: trackName,
-              electiveMajor,
-              electiveSemester: semester,
-            }
+            electiveTrack: trackName,
+            electiveMajor,
+            electiveSemester: semester,
+          }
           : {}),
         enrollment,
         faculty: courseFaculty,
@@ -3977,40 +3716,44 @@ function AdminPortal({
   const handleRemoveCourse = () => {
     if (!courseToRemove) return;
 
-    const courseRecordKey = getCourseRecordKey(courseToRemove);
     const courseCode = normalizeCourseIdentifier(courseToRemove.code);
-    const isElective =
-      /\(Elective\)/i.test(courseToRemove.title) || courseToRemove.electiveTrack !== undefined;
+    const courseTitle = normalizeCourseIdentifier(
+      courseToRemove.title.replace(/\s*\(Elective\)$/i, ""),
+    );
 
     setCourses((previousCourses) =>
-      previousCourses.filter((course) => getCourseRecordKey(course) !== courseRecordKey),
+      previousCourses.filter(
+        (course) => normalizeCourseIdentifier(course.code) !== courseCode,
+      ),
     );
-    if (isElective) {
-      setTrackElectiveCourses((previousCourses) =>
-        previousCourses.filter((course) => normalizeCourseIdentifier(course.code) !== courseCode),
-      );
-    }
+    setTrackElectiveCourses((previousCourses) =>
+      previousCourses.filter(
+        (course) => normalizeCourseIdentifier(course.code) !== courseCode,
+      ),
+    );
     setEvents((previousEvents) =>
       previousEvents.filter((event) => !eventMatchesCourse(event, courseToRemove)),
     );
     setExams((previousExams) =>
-      previousExams.filter((exam) => !examMatchesCourse(exam, courseToRemove)),
+      previousExams.filter(
+        (exam) =>
+          normalizeCourseIdentifier(exam.code) !== courseCode &&
+          normalizeCourseIdentifier(exam.title) !== courseTitle,
+      ),
     );
-    if (isElective) {
-      setElectiveTracks((previousTracks) =>
-        previousTracks
-          .map((track) => ({
-            ...track,
-            semester1: track.semester1.filter(
-              (code) => normalizeCourseIdentifier(code) !== courseCode,
-            ),
-            semester2: track.semester2.filter(
-              (code) => normalizeCourseIdentifier(code) !== courseCode,
-            ),
-          }))
-          .filter((track) => track.semester1.length > 0 || track.semester2.length > 0),
-      );
-    }
+    setElectiveTracks((previousTracks) =>
+      previousTracks
+        .map((track) => ({
+          ...track,
+          semester1: track.semester1.filter(
+            (code) => normalizeCourseIdentifier(code) !== courseCode,
+          ),
+          semester2: track.semester2.filter(
+            (code) => normalizeCourseIdentifier(code) !== courseCode,
+          ),
+        }))
+        .filter((track) => track.semester1.length > 0 || track.semester2.length > 0),
+    );
 
     showAppNotification(`Course ${courseToRemove.code} was removed.`, "success");
     setCourseFormSuccess(null);
@@ -4067,8 +3810,8 @@ function AdminPortal({
     );
     const currentSemester: 1 | 2 | undefined = assignedTrack
       ? assignedTrack.semester1.some(
-          (code) => normalizeCourseIdentifier(code) === courseCode,
-        )
+        (code) => normalizeCourseIdentifier(code) === courseCode,
+      )
         ? 1
         : 2
       : undefined;
@@ -4087,37 +3830,37 @@ function AdminPortal({
         previousTracks.map((track) =>
           track.name === assignedTrack.name
             ? {
-                ...track,
-                semester1: track.semester1.filter(
-                  (code) => normalizeCourseIdentifier(code) !== courseCode,
-                ),
-                semester2: track.semester2.filter(
-                  (code) => normalizeCourseIdentifier(code) !== courseCode,
-                ),
-                [nextSemester === 1 ? "semester1" : "semester2"]: [
-                  ...targetCodes,
-                  originalCourse.code,
-                ],
-              }
+              ...track,
+              semester1: track.semester1.filter(
+                (code) => normalizeCourseIdentifier(code) !== courseCode,
+              ),
+              semester2: track.semester2.filter(
+                (code) => normalizeCourseIdentifier(code) !== courseCode,
+              ),
+              [nextSemester === 1 ? "semester1" : "semester2"]: [
+                ...targetCodes,
+                originalCourse.code,
+              ],
+            }
             : track,
         ),
       );
     }
 
     const updateCourse = (course: CourseData): CourseData =>
-      getCourseRecordKey(course) === getCourseRecordKey(originalCourse)
+      normalizeCourseIdentifier(course.code) === courseCode
         ? {
-            ...course,
-            title: nextTitle,
-            faculty: facultyName,
-            ...(isElective
-              ? {
-                  ...(assignedTrack ? { electiveTrack: assignedTrack.name } : {}),
-                  electiveMajor: assignedTrack?.major ?? courseEdit.major,
-                  electiveSemester: nextSemester,
-                }
-              : {}),
-          }
+          ...course,
+          title: nextTitle,
+          faculty: facultyName,
+          ...(isElective
+            ? {
+              ...(assignedTrack ? { electiveTrack: assignedTrack.name } : {}),
+              electiveMajor: assignedTrack?.major ?? courseEdit.major,
+              electiveSemester: nextSemester,
+            }
+            : {}),
+        }
         : course;
     if (courseEdit.source === "track-elective") {
       setTrackElectiveCourses((previousCourses) => previousCourses.map(updateCourse));
@@ -4145,7 +3888,8 @@ function AdminPortal({
       );
       setExams((previousExams) =>
         previousExams.map((exam) =>
-          examMatchesCourse(exam, originalCourse)
+          normalizeCourseIdentifier(exam.code) === courseCode ||
+            normalizeCourseIdentifier(exam.title) === normalizeCourseIdentifier(oldTitle)
             ? { ...exam, title: nextTitleBase }
             : exam,
         ),
@@ -4157,7 +3901,7 @@ function AdminPortal({
 
   const handleSaveLecturer = (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!editingLecturerKey) return;
+    if (!editingLecturerCode) return;
 
     const lecturer = lecturerDraft.trim();
     if (!lecturer) {
@@ -4166,18 +3910,18 @@ function AdminPortal({
     }
 
     const course = courses.find(
-      (item) => getCourseRecordKey(item) === editingLecturerKey,
+      (item) => normalizeCourseIdentifier(item.code) === editingLecturerCode,
     );
     if (!course) {
       showAppNotification("That course is no longer available.", "error");
-      setEditingLecturerKey(null);
+      setEditingLecturerCode(null);
       setLecturerDraft("");
       return;
     }
 
     setCourses((previousCourses) =>
       previousCourses.map((item) =>
-        getCourseRecordKey(item) === editingLecturerKey
+        normalizeCourseIdentifier(item.code) === editingLecturerCode
           ? { ...item, faculty: lecturer }
           : item,
       ),
@@ -4188,7 +3932,7 @@ function AdminPortal({
       ),
     );
     showAppNotification(`Lecturer updated for ${course.code}.`, "success");
-    setEditingLecturerKey(null);
+    setEditingLecturerCode(null);
     setLecturerDraft("");
   };
 
@@ -4248,23 +3992,23 @@ function AdminPortal({
       previousTracks.map((item) =>
         item.name === trackName
           ? {
-              ...item,
-              [semester === 1 ? "semester1" : "semester2"]: [
-                ...semesterCodes,
-                course.code,
-              ],
-            }
+            ...item,
+            [semester === 1 ? "semester1" : "semester2"]: [
+              ...semesterCodes,
+              course.code,
+            ],
+          }
           : item,
       ),
     );
     const assignElective = (item: CourseData): CourseData =>
       normalizeCourseIdentifier(item.code) === normalizedCode
         ? {
-            ...item,
-            electiveTrack: trackName,
-            electiveMajor: track.major,
-            electiveSemester: semester,
-          }
+          ...item,
+          electiveTrack: trackName,
+          electiveMajor: track.major,
+          electiveSemester: semester,
+        }
         : item;
     const hasCourseEntry = courses.some(
       (item) =>
@@ -4293,7 +4037,7 @@ function AdminPortal({
     setCourses((previousCourses) =>
       previousCourses.map((course) =>
         assignedCodes.has(normalizeCourseIdentifier(course.code)) &&
-        (/\(Elective\)/i.test(course.title) || course.electiveTrack !== undefined)
+          (/\(Elective\)/i.test(course.title) || course.electiveTrack !== undefined)
           ? { ...course, electiveMajor: major }
           : course,
       ),
@@ -4318,11 +4062,11 @@ function AdminPortal({
       previousTracks.map((track) =>
         track.name === trackName
           ? {
-              ...track,
-              [semester === 1 ? "semester1" : "semester2"]: track[
-                semester === 1 ? "semester1" : "semester2"
-              ].filter((code) => normalizeCourseIdentifier(code) !== normalizedCode),
-            }
+            ...track,
+            [semester === 1 ? "semester1" : "semester2"]: track[
+              semester === 1 ? "semester1" : "semester2"
+            ].filter((code) => normalizeCourseIdentifier(code) !== normalizedCode),
+          }
           : track,
       ),
     );
@@ -4479,8 +4223,12 @@ function AdminPortal({
   const handleConfirmRollover = () => {
     const nextSem: "Semester 1" | "Semester 2" =
       currentSemester === "Semester 1" ? "Semester 2" : "Semester 1";
-    const nextYear =
-      currentSemester === "Semester 1" ? academicYear : getNextAcademicYear(academicYear);
+    let nextYear =
+      currentSemester === "Semester 1"
+        ? academicYear
+        : academicYear === "2025/26"
+          ? "2026/27"
+          : "2027/28";
 
     setAcademicYear(nextYear);
     setCurrentSemester(nextSem);
@@ -4520,7 +4268,7 @@ function AdminPortal({
               copy="Live monitoring of schedule health, faculty confirmations, room load, and intake cohorts."
               action={
                 <button className="date-button" onClick={() => navigate("Settings")}>
-                  <Icon name="calendar-03" /> {currentSemester} · {academicYear}
+                  <Icon name="calendar-03" /> Semester 2 · 2025/26
                 </button>
               }
             />
@@ -4562,20 +4310,7 @@ function AdminPortal({
             {/* Metrics */}
             <div className="metrics">
               {[
-                [
-                  "Active courses",
-                  courses.length.toString(),
-                  `${new Set(courses.map((course) => course.department)).size} departments`,
-                ],
-                [
-                  "Demo students",
-                  demoStudentCount.toLocaleString(),
-                  demoDataLoading
-                    ? "Loading local database"
-                    : demoDataError
-                      ? "Local database unavailable"
-                      : "17 programmes · Levels 100–400 · IndexedDB",
-                ],
+                ["Active courses", courses.length.toString(), "14 departments"],
                 [
                   "Rooms in use",
                   `${rooms.filter((r) => r.status === "In use").length} / ${rooms.length}`,
@@ -4584,17 +4319,17 @@ function AdminPortal({
                 [
                   "Faculty Confirmed",
                   `${confirmedFacultyCount} / ${totalFacultyCount}`,
-                  `${totalFacultyCount - confirmedFacultyCount} pending approval`,
+                  "3 pending approval",
                 ],
                 [
                   "Open conflicts",
                   conflictCount.toString().padStart(2, "0"),
                   conflictCount === 0 ? "All resolved" : "Attention required",
                 ],
-              ].map((metric) => (
+              ].map((metric, index) => (
                 <article
                   key={metric[0]}
-                  className={metric[0] === "Open conflicts" && conflictCount > 0 ? "attention" : ""}
+                  className={index === 3 && conflictCount > 0 ? "attention" : ""}
                 >
                   <span>{metric[0]}</span>
                   <strong>{metric[1]}</strong>
@@ -4602,11 +4337,6 @@ function AdminPortal({
                 </article>
               ))}
             </div>
-            {demoDataError && (
-              <p className="academic-calendar-error" role="alert">
-                Local demo data could not be loaded or saved: {demoDataError}
-              </p>
-            )}
 
             {/* Cohorts & Faculty Confirmation Tracker Grid */}
             <div className="admin-grid" style={{ marginTop: "24px" }}>
@@ -4665,12 +4395,12 @@ function AdminPortal({
                               prev.map((item) =>
                                 item.id === f.id
                                   ? {
-                                      ...item,
-                                      confirmed: !item.confirmed,
-                                      confirmedAt: !item.confirmed
-                                        ? "Just now (Admin sign-off)"
-                                        : null,
-                                    }
+                                    ...item,
+                                    confirmed: !item.confirmed,
+                                    confirmedAt: !item.confirmed
+                                      ? "Just now (Admin sign-off)"
+                                      : null,
+                                  }
                                   : item,
                               ),
                             );
@@ -4819,17 +4549,17 @@ function AdminPortal({
                 {viewMode === "programme" && (
                   <>
                     <div className="tt-filter-item">
-                      <span className="tt-filter-label">Programme</span>
+                      <span className="tt-filter-label">Major</span>
                       <select
                         className="tt-filter-select"
                         value={selectedMajor}
                         onChange={(e) => setSelectedMajor(e.target.value as Programme)}
                       >
-                        {ACADEMIC_PROGRAMMES.map((programme) => (
-                          <option key={programme.code} value={programme.code}>
-                            {programme.name} ({programme.code})
-                          </option>
-                        ))}
+                        <option value="CS">Computer Science (CS)</option>
+                        <option value="CE">Computer Engineering (CE)</option>
+                        <option value="EE">Electrical & Electronic Engineering (EE)</option>
+                        <option value="ME">Mechanical Engineering (ME)</option>
+                        <option value="BA">Business Administration (BA)</option>
                       </select>
                     </div>
 
@@ -5015,7 +4745,7 @@ function AdminPortal({
                         : `Classroom Occupancy: ${selectedRoom}`}
                   </strong>
                   <span>
-                    {currentSemester} · 2025/2026
+                    {viewMode === "programme" ? currentSemester : "Semester 2"} · 2025/2026
                     Academic Year · 9 Daily Periods
                   </span>
                 </div>
@@ -5150,7 +4880,7 @@ function AdminPortal({
                   {courseForm.courseType === "Elective" && (
                     <>
                       <label>
-                        <span>Programme</span>
+                        <span>Major</span>
                         <select
                           value={courseForm.electiveMajor}
                           onChange={(event) =>
@@ -5162,11 +4892,11 @@ function AdminPortal({
                             }))
                           }
                         >
-                          {ACADEMIC_PROGRAMMES.map((programme) => (
-                            <option key={programme.code} value={programme.code}>
-                              {programme.name} ({programme.code})
-                            </option>
-                          ))}
+                          <option value="CS">Computer Science (CS)</option>
+                          <option value="CE">Computer Engineering (CE)</option>
+                          <option value="EE">Electrical & Electronic Engineering (EE)</option>
+                          <option value="ME">Mechanical Engineering (ME)</option>
+                          <option value="BA">Business Administration (BA)</option>
                         </select>
                       </label>
                       <label>
@@ -5186,9 +4916,9 @@ function AdminPortal({
                           {electiveTracks
                             .filter((track) => track.major === courseForm.electiveMajor)
                             .map((track) => (
-                            <option key={track.name} value={track.name}>
-                              {track.name} · {track.major}
-                            </option>
+                              <option key={track.name} value={track.name}>
+                                {track.name} · {track.major}
+                              </option>
                             ))}
                           <option value={createElectiveTrackOption}>Create a new track</option>
                         </select>
@@ -5318,20 +5048,20 @@ function AdminPortal({
                         <div className="elective-track-card__header">
                           <strong>{track.name}</strong>
                           <label>
-                            <span>Programme</span>
+                            <span>Major</span>
                             <select
                               value={track.major}
                               onChange={(event) =>
                                 handleUpdateTrackMajor(track.name, event.target.value as Programme)
                               }
-                              aria-label={`Programme for ${track.name}`}
-                              title="Changing the programme applies to all electives in this track"
+                              aria-label={`Major for ${track.name}`}
+                              title="Changing the major applies to all electives in this track"
                             >
-                              {ACADEMIC_PROGRAMMES.map((programme) => (
-                                <option key={programme.code} value={programme.code}>
-                                  {programme.name} ({programme.code})
-                                </option>
-                              ))}
+                              <option value="CS">Computer Science (CS)</option>
+                              <option value="CE">Computer Engineering (CE)</option>
+                              <option value="EE">Electrical & Electronic Engineering (EE)</option>
+                              <option value="ME">Mechanical Engineering (ME)</option>
+                              <option value="BA">Business Administration (BA)</option>
                             </select>
                           </label>
                         </div>
@@ -5397,148 +5127,138 @@ function AdminPortal({
               </div>
               {filteredCourses.length > 0 ? (
                 filteredCourses.map((c) => (
-                <div className="table-row" role="row" key={getCourseRecordKey(c)}>
-                  <span>
-                    <b>
-                      <HighlightedCourseName name={c.title} query={courseSearch} />
-                    </b>
-                    <small>{c.code}</small>
-                    {c.programme && c.level && (
-                      <small>
-                        {ACADEMIC_PROGRAMMES.find(
-                          (programme) => programme.code === c.programme,
-                        )?.name ?? c.programme}{" "}
-                        · Level {c.level}
+                  <div className="table-row" role="row" key={c.code}>
+                    <span>
+                      <b>
+                        <HighlightedCourseName name={c.title} query={courseSearch} />
+                      </b>
+                      <small>{c.code}</small>
+                      <small style={{ fontWeight: 600, color: "#333" }}>
+                        {c.lectureHours + c.labHours}{" "}
+                        {c.lectureHours + c.labHours === 1 ? "hour" : "hours"} per week
                       </small>
-                    )}
-                    <small style={{ fontWeight: 600, color: "#333" }}>
-                      {c.lectureHours + c.labHours}{" "}
-                      {c.programme ? "catalogue contact hours" : "hours"} per week
-                    </small>
-                    <small>
-                      {c.programme
-                        ? `Sample timetable: ${getCourseWeeklySessions(c).join("h + ")}h sessions`
-                        : getCourseWeeklySessions(c).length === 2
+                      <small>
+                        {getCourseWeeklySessions(c).length === 2
                           ? `${getCourseWeeklySessions(c).join("h + ")}h sessions at different times`
                           : `${getCourseWeeklySessions(c)[0] ?? 0}h single session`}
-                    </small>
-                  </span>
-                  <span className="course-lecturer-cell" data-label="Lecturer">
-                    {editingLecturerKey === getCourseRecordKey(c) ? (
-                      <form className="course-lecturer-edit" onSubmit={handleSaveLecturer}>
-                        <input
-                          autoFocus
-                          value={lecturerDraft}
-                          onChange={(event) => setLecturerDraft(event.target.value)}
-                          aria-label={`Lecturer for ${c.code}`}
-                          required
-                        />
-                        <button type="submit" className="course-inline-action">
-                          Save
-                        </button>
-                        <button
-                          type="button"
-                          className="course-inline-action course-inline-action--secondary"
-                          onClick={() => {
-                            setEditingLecturerKey(null);
-                            setLecturerDraft("");
-                          }}
-                        >
-                          Cancel
-                        </button>
-                      </form>
-                    ) : (
-                      <>
-                        <span>{c.faculty}</span>
-                        <button
-                          type="button"
-                          className="course-inline-action course-inline-action--secondary"
-                          onClick={() => {
-                            setEditingLecturerKey(getCourseRecordKey(c));
-                            setLecturerDraft(c.faculty);
-                          }}
-                        >
-                          Change
-                        </button>
-                      </>
-                    )}
-                  </span>
-                  <span data-label="Enrollment">
-                    <strong>{c.enrollment} students</strong>
-                    {c.enrollment >= 60 && (
-                      <small style={{ color: "#000", fontWeight: 700, display: "block" }}>
-                        Split Threshold Met (≥60)
                       </small>
-                    )}
-                  </span>
-                  <span data-label="Group split status">
-                    {c.requiresSplit ? (
-                      <span className="badge-confirmed">
-                        <Icon name="checkmark-circle-02" /> {c.groupAllocation}
-                      </span>
-                    ) : (
-                      <span className="badge-pending">Single Section ({c.enrollment})</span>
-                    )}
-                  </span>
-                  <span className="course-actions" data-label="Actions">
-                    {c.enrollment >= 60 && !c.requiresSplit ? (
+                    </span>
+                    <span className="course-lecturer-cell" data-label="Lecturer">
+                      {editingLecturerCode === normalizeCourseIdentifier(c.code) ? (
+                        <form className="course-lecturer-edit" onSubmit={handleSaveLecturer}>
+                          <input
+                            autoFocus
+                            value={lecturerDraft}
+                            onChange={(event) => setLecturerDraft(event.target.value)}
+                            aria-label={`Lecturer for ${c.code}`}
+                            required
+                          />
+                          <button type="submit" className="course-inline-action">
+                            Save
+                          </button>
+                          <button
+                            type="button"
+                            className="course-inline-action course-inline-action--secondary"
+                            onClick={() => {
+                              setEditingLecturerCode(null);
+                              setLecturerDraft("");
+                            }}
+                          >
+                            Cancel
+                          </button>
+                        </form>
+                      ) : (
+                        <>
+                          <span>{c.faculty}</span>
+                          <button
+                            type="button"
+                            className="course-inline-action course-inline-action--secondary"
+                            onClick={() => {
+                              setEditingLecturerCode(normalizeCourseIdentifier(c.code));
+                              setLecturerDraft(c.faculty);
+                            }}
+                          >
+                            Change
+                          </button>
+                        </>
+                      )}
+                    </span>
+                    <span data-label="Enrollment">
+                      <strong>{c.enrollment} students</strong>
+                      {c.enrollment >= 60 && (
+                        <small style={{ color: "#000", fontWeight: 700, display: "block" }}>
+                          Split Threshold Met (≥60)
+                        </small>
+                      )}
+                    </span>
+                    <span data-label="Group split status">
+                      {c.requiresSplit ? (
+                        <span className="badge-confirmed">
+                          <Icon name="checkmark-circle-02" /> {c.groupAllocation}
+                        </span>
+                      ) : (
+                        <span className="badge-pending">Single Section ({c.enrollment})</span>
+                      )}
+                    </span>
+                    <span className="course-actions" data-label="Actions">
+                      {c.enrollment >= 60 && !c.requiresSplit ? (
+                        <button
+                          type="button"
+                          style={{
+                            padding: "6px 12px",
+                            border: "1px solid #000",
+                            background: "#000",
+                            color: "#fff",
+                            borderRadius: "4px",
+                            fontSize: "11.5px",
+                            fontWeight: 600,
+                            cursor: "pointer",
+                          }}
+                          onClick={() => handleExecuteSplit(c)}
+                        >
+                          Auto-Split Course
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          style={{
+                            padding: "6px 12px",
+                            border: "1px solid #ccc",
+                            background: "#fff",
+                            borderRadius: "4px",
+                            fontSize: "11.5px",
+                            cursor: "pointer",
+                          }}
+                          onClick={() =>
+                            showAppNotification(
+                              `${c.code}: Course session structure complies with 60–180 min continuous block policy.`,
+                              "success",
+                            )
+                          }
+                        >
+                          Inspect Rules
+                        </button>
+                      )}
                       <button
                         type="button"
-                        style={{
-                          padding: "6px 12px",
-                          border: "1px solid #000",
-                          background: "#000",
-                          color: "#fff",
-                          borderRadius: "4px",
-                          fontSize: "11.5px",
-                          fontWeight: 600,
-                          cursor: "pointer",
-                        }}
-                        onClick={() => handleExecuteSplit(c)}
+                        className="course-inline-action course-inline-action--secondary"
+                        aria-label={`Edit ${c.code}`}
+                        onClick={() => openCourseEdit(c)}
                       >
-                        Auto-Split Course
+                        Edit
                       </button>
-                    ) : (
                       <button
                         type="button"
-                        style={{
-                          padding: "6px 12px",
-                          border: "1px solid #ccc",
-                          background: "#fff",
-                          borderRadius: "4px",
-                          fontSize: "11.5px",
-                          cursor: "pointer",
-                        }}
-                        onClick={() =>
-                          showAppNotification(
-                            `${c.code}: Course session structure complies with 60–180 min continuous block policy.`,
-                            "success",
-                          )
-                        }
+                        className="course-remove-btn"
+                        aria-label={`${/\(Elective\)/i.test(c.title) || c.electiveTrack ? "Delete elective" : "Remove"} ${c.code}`}
+                        onClick={() => setCourseToRemove(c)}
                       >
-                        Inspect Rules
+                        {/\(Elective\)/i.test(c.title) || c.electiveTrack
+                          ? "Delete Elective"
+                          : "Remove"}
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      className="course-inline-action course-inline-action--secondary"
-                      aria-label={`Edit ${c.code}`}
-                      onClick={() => openCourseEdit(c)}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      type="button"
-                      className="course-remove-btn"
-                      aria-label={`${/\(Elective\)/i.test(c.title) || c.electiveTrack ? "Delete elective" : "Remove"} ${c.code}`}
-                      onClick={() => setCourseToRemove(c)}
-                    >
-                      {/\(Elective\)/i.test(c.title) || c.electiveTrack
-                        ? "Delete Elective"
-                        : "Remove"}
-                    </button>
-                  </span>
-                </div>
+                    </span>
+                  </div>
                 ))
               ) : (
                 <div className="table-row" role="row">
@@ -5714,25 +5434,8 @@ function AdminPortal({
           </>
         )}
 
-        {activeTab === "Calendar" && (
-          <>
-            <PageHeading
-              eyebrow="ADMINISTRATION · ACADEMIC CALENDAR"
-              title="Semester dates & events."
-              copy="Import the semester spreadsheet, manage campus dates, and publish holidays and events to student and lecturer calendars."
-            />
-            <AcademicCalendarManager
-              calendar={academicCalendar}
-              entries={calendarEntries}
-              error={calendarError}
-              loading={calendarLoading}
-              onSave={onSaveAcademicCalendar}
-            />
-          </>
-        )}
-
         {/* =========================================================================
-            TAB 7: SYSTEM SETTINGS & SEMESTER ROLLOVER WORKFLOW
+            TAB 6: SYSTEM SETTINGS & SEMESTER ROLLOVER WORKFLOW
             ========================================================================= */}
         {activeTab === "Settings" && (
           <>
@@ -5850,11 +5553,9 @@ function AdminPortal({
                   <label>
                     <span>Academic year</span>
                     <select value={academicYear} onChange={(e) => setAcademicYear(e.target.value)}>
-                      {academicYearOptions.map((year) => (
-                        <option key={year} value={year}>
-                          {year}
-                        </option>
-                      ))}
+                      <option value="2025/26">2025/26</option>
+                      <option value="2026/27">2026/27</option>
+                      <option value="2027/28">2027/28</option>
                     </select>
                   </label>
                   <label>
@@ -6358,7 +6059,7 @@ function AdminPortal({
                             <input
                               type="checkbox"
                               checked={isVerified}
-                              onChange={() => {}} // handled by parent onClick
+                              onChange={() => { }} // handled by parent onClick
                               style={{
                                 width: "16px",
                                 height: "16px",
@@ -6581,10 +6282,10 @@ function AdminPortal({
                     value={
                       isAdminRescheduleSelectionAvailable
                         ? getScheduleSuggestionKey({
-                            day: newDay,
-                            slot: newSlot,
-                            roomCode: newRoom,
-                          })
+                          day: newDay,
+                          slot: newSlot,
+                          roomCode: newRoom,
+                        })
                         : ""
                     }
                     onChange={(e) => {
@@ -6720,10 +6421,10 @@ function AdminPortal({
                       value={
                         isBookingSelectionAvailable
                           ? getScheduleSuggestionKey({
-                              day: bookingDay,
-                              slot: bookingSlot,
-                              roomCode: bookingRoom,
-                            })
+                            day: bookingDay,
+                            slot: bookingSlot,
+                            roomCode: bookingRoom,
+                          })
                           : ""
                       }
                       onChange={(e) => {
@@ -6831,7 +6532,9 @@ function AdminPortal({
                   {currentSemester === "Semester 1" ? "Semester 2" : "Semester 1"} (
                   {currentSemester === "Semester 1"
                     ? academicYear
-                    : getNextAcademicYear(academicYear)}
+                    : academicYear === "2025/26"
+                      ? "2026/27"
+                      : "2027/28"}
                   )
                 </strong>
                 .
@@ -6979,57 +6682,57 @@ function AdminPortal({
                 </label>
                 {(/\(Elective\)/i.test(courseEdit.course.title) ||
                   courseEdit.course.electiveTrack !== undefined) && (
-                  <>
-                    <label>
-                      <span>Semester</span>
-                      <select
-                        value={courseEdit.semester}
-                        onChange={(event) =>
-                          setCourseEdit((current) =>
-                            current
-                              ? { ...current, semester: event.target.value as "1" | "2" }
-                              : current,
-                          )
-                        }
-                      >
-                        <option value="1">Semester 1</option>
-                        <option value="2">Semester 2</option>
-                      </select>
-                    </label>
-                    {electiveTracks.some((track) =>
-                      [...track.semester1, ...track.semester2].some(
-                        (code) =>
-                          normalizeCourseIdentifier(code) ===
-                          normalizeCourseIdentifier(courseEdit.course.code),
-                      ),
-                    ) ? (
-                      <p className="course-update-track-note">
-                        The elective’s major is inherited from its track. Change it in the track
-                        assignments below.
-                      </p>
-                    ) : (
+                    <>
                       <label>
-                        <span>Programme</span>
+                        <span>Semester</span>
                         <select
-                          value={courseEdit.major}
+                          value={courseEdit.semester}
                           onChange={(event) =>
                             setCourseEdit((current) =>
                               current
-                                ? { ...current, major: event.target.value as Programme }
+                                ? { ...current, semester: event.target.value as "1" | "2" }
                                 : current,
                             )
                           }
                         >
-                          {ACADEMIC_PROGRAMMES.map((programme) => (
-                            <option key={programme.code} value={programme.code}>
-                              {programme.name} ({programme.code})
-                            </option>
-                          ))}
+                          <option value="1">Semester 1</option>
+                          <option value="2">Semester 2</option>
                         </select>
                       </label>
-                    )}
-                  </>
-                )}
+                      {electiveTracks.some((track) =>
+                        [...track.semester1, ...track.semester2].some(
+                          (code) =>
+                            normalizeCourseIdentifier(code) ===
+                            normalizeCourseIdentifier(courseEdit.course.code),
+                        ),
+                      ) ? (
+                        <p className="course-update-track-note">
+                          The elective’s major is inherited from its track. Change it in the track
+                          assignments below.
+                        </p>
+                      ) : (
+                        <label>
+                          <span>Major</span>
+                          <select
+                            value={courseEdit.major}
+                            onChange={(event) =>
+                              setCourseEdit((current) =>
+                                current
+                                  ? { ...current, major: event.target.value as Programme }
+                                  : current,
+                              )
+                            }
+                          >
+                            <option value="CS">Computer Science (CS)</option>
+                            <option value="CE">Computer Engineering (CE)</option>
+                            <option value="EE">Electrical & Electronic Engineering (EE)</option>
+                            <option value="ME">Mechanical Engineering (ME)</option>
+                            <option value="BA">Business Administration (BA)</option>
+                          </select>
+                        </label>
+                      )}
+                    </>
+                  )}
               </div>
               <div className="modal-footer">
                 <button
@@ -7062,12 +6765,6 @@ function TeacherPortal({
   setFaculty,
   rooms,
   courses,
-  academicYear,
-  currentSemester,
-  academicCalendar,
-  calendarEntries,
-  calendarLoading,
-  calendarError,
   saturdayEnabled,
   onLogout,
   onSwitchRole,
@@ -7078,12 +6775,6 @@ function TeacherPortal({
   setFaculty: React.Dispatch<React.SetStateAction<FacultyMember[]>>;
   rooms: RoomFacility[];
   courses: CourseData[];
-  academicYear: string;
-  currentSemester: AcademicSemesterName;
-  academicCalendar: AcademicSemesterCalendar;
-  calendarEntries: AcademicCalendarEntry[];
-  calendarLoading: boolean;
-  calendarError: string | null;
   saturdayEnabled: boolean;
   onLogout: () => void;
   onSwitchRole: (r: Role) => void;
@@ -7100,24 +6791,18 @@ function TeacherPortal({
   const [teacherNewRoom, setTeacherNewRoom] = useState("");
   const [teacherOnlineMeeting, setTeacherOnlineMeeting] = useState(false);
   const [teacherRescheduleError, setTeacherRescheduleError] = useState<string | null>(null);
-  const [selectedFacultyId, setSelectedFacultyId] = useState("kc");
 
-  const currentFaculty = faculty.find((member) => member.id === selectedFacultyId) || faculty[0];
+  const currentFaculty = faculty.find((f) => f.name === "Kwesi Crankson") || faculty[0];
 
   // Personal schedule
   const teacherEvents = useMemo(
     () =>
-      events.filter(
-        (ev) =>
-          ev.semester === (currentSemester === "Semester 1" ? 1 : 2) &&
-          ev.person.toLowerCase().includes(currentFaculty.name.toLowerCase()),
-      ),
-    [events, currentFaculty, currentSemester],
+      events.filter((ev) => ev.person.toLowerCase().includes(currentFaculty.name.toLowerCase())),
+    [events, currentFaculty],
   );
   const teacherCourses = courses.filter((course) =>
     course.faculty.toLowerCase().includes(currentFaculty.name.toLowerCase()),
   );
-  const upcomingHolidays = getUpcomingCalendarEntries(calendarEntries, "Lecturers", 6);
 
   const getTeacherScheduleSuggestions = (event: TimetableEvent, onlineMeeting = false) => {
     const days =
@@ -7164,7 +6849,6 @@ function TeacherPortal({
   const teacherNav = [
     ["Home", "dashboard-square-01"],
     ["Timetable", "calendar-03"],
-    ["Calendar", "calendar-03"],
     ["Courses", "book-open-01"],
     ["Unavailability", "time-02"],
     ["Export", "download-04"],
@@ -7233,26 +6917,19 @@ function TeacherPortal({
       return;
     }
 
-    const updateTargetEvent = (event: TimetableEvent) =>
-      event.id === teacherTargetEvent.id
-        ? {
+    setEvents((prev) =>
+      prev.map((event) =>
+        event.id === teacherTargetEvent.id
+          ? {
             ...event,
             day: teacherNewDay,
             start: teacherNewSlot,
             room: teacherOnlineMeeting ? event.room : teacherNewRoom,
             onlineMeeting: teacherOnlineMeeting,
           }
-        : event;
-    const updatedEvents = events.map(updateTargetEvent);
-    const roomConflict = findClassroomTimeConflict(updatedEvents, ONLINE_MEETING_ROOM);
-    if (roomConflict) {
-      setTeacherRescheduleError(
-        `${roomConflict.room} is double-booked by ${roomConflict.first.code} and ${roomConflict.second.code}.`,
-      );
-      return;
-    }
-
-    setEvents((previousEvents) => previousEvents.map(updateTargetEvent));
+          : event,
+      ),
+    );
     setTeacherRescheduleOpen(false);
     setTeacherRescheduleError(null);
   };
@@ -7274,10 +6951,10 @@ function TeacherPortal({
       prev.map((f) =>
         f.id === currentFaculty.id
           ? {
-              ...f,
-              confirmed: !f.confirmed,
-              confirmedAt: !f.confirmed ? "Confirmed today" : null,
-            }
+            ...f,
+            confirmed: !f.confirmed,
+            confirmedAt: !f.confirmed ? "Confirmed today" : null,
+          }
           : f,
       ),
     );
@@ -7292,20 +6969,27 @@ function TeacherPortal({
   };
 
   const handleSetOnlineMeeting = (event: TimetableEvent, onlineMeeting: boolean) => {
-    const updatedEvents = events.map((item) =>
-      item.id === event.id ? { ...item, onlineMeeting } : item,
-    );
-    const roomConflict = findClassroomTimeConflict(updatedEvents, ONLINE_MEETING_ROOM);
-    if (roomConflict) {
-      showAppNotification(
-        `${roomConflict.room} is double-booked by ${roomConflict.first.code} and ${roomConflict.second.code}.`,
-        "error",
+    if (!onlineMeeting && event.onlineMeeting) {
+      const roomConflict = events.find(
+        (other) =>
+          other.id !== event.id &&
+          !other.onlineMeeting &&
+          other.day === event.day &&
+          other.room === event.room &&
+          Math.max(other.start, event.start) <
+          Math.min(other.start + (other.span || 1), event.start + (event.span || 1)),
       );
-      return;
+      if (roomConflict) {
+        showAppNotification(
+          `${event.room} is already occupied by ${roomConflict.code} during that time.`,
+          "error",
+        );
+        return;
+      }
     }
 
-    setEvents((previousEvents) =>
-      previousEvents.map((item) => (item.id === event.id ? { ...item, onlineMeeting } : item)),
+    setEvents((prev) =>
+      prev.map((item) => (item.id === event.id ? { ...item, onlineMeeting } : item)),
     );
   };
 
@@ -7330,7 +7014,7 @@ function TeacherPortal({
         onLogout={onLogout}
         onSwitchRole={onSwitchRole}
         userName={currentFaculty.name}
-        term={`${currentSemester} · ${academicYear}`}
+        term="Semester 2 · 2025/26"
         navItems={teacherNav.map(([label, icon]) => ({
           id: label,
           label,
@@ -7351,43 +7035,9 @@ function TeacherPortal({
               title={`Welcome back, ${currentFaculty.name.split(" ")[0]}.`}
               copy="Review your weekly teaching sessions, room locations, and timetable sign-off status."
               action={
-                <div style={{ display: "flex", gap: "8px", flexWrap: "wrap", alignItems: "center" }}>
-                  <label
-                    style={{
-                      display: "flex",
-                      gap: "8px",
-                      alignItems: "center",
-                      color: "#555",
-                      fontSize: "12px",
-                    }}
-                  >
-                    Demo lecturer
-                    <select
-                      aria-label="Select demo lecturer"
-                      value={currentFaculty.id}
-                      onChange={(event) => setSelectedFacultyId(event.target.value)}
-                      style={{
-                        maxWidth: "100%",
-                        minWidth: "190px",
-                        padding: "10px 12px",
-                        border: "1px solid #d1d5db",
-                        borderRadius: "8px",
-                        background: "#fff",
-                        color: "#111",
-                        fontSize: "12px",
-                      }}
-                    >
-                      {faculty.map((member) => (
-                        <option key={member.id} value={member.id}>
-                          {member.name} · {member.department}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                  <button className="date-button" onClick={() => navigate("Timetable")}>
-                    <Icon name="calendar-03" /> {currentSemester} · {academicYear}
-                  </button>
-                </div>
+                <button className="date-button" onClick={() => navigate("Timetable")}>
+                  <Icon name="calendar-03" /> Semester 2 · 2025/26
+                </button>
               }
             />
 
@@ -7441,36 +7091,6 @@ function TeacherPortal({
             </div>
 
             <NextClassRadar role="Teacher" facultyName={currentFaculty.name} />
-
-            <section className="student-holidays-panel" aria-labelledby="teacher-holidays-heading">
-              <header className="student-holidays-header">
-                <div>
-                  <span className="student-holidays-eyebrow">UPCOMING · ACADEMIC CALENDAR</span>
-                  <h3 id="teacher-holidays-heading">Holidays &amp; Events</h3>
-                </div>
-                <span className="student-holidays-term">Next 6 dates</span>
-              </header>
-              <div className="student-holidays-list">
-                {upcomingHolidays.length > 0 ? (
-                  upcomingHolidays.map((holiday) => (
-                    <article className="student-holiday" key={holiday.id}>
-                      <div>
-                        <h4>{holiday.title}</h4>
-                        <span>
-                          {holiday.type} ·{" "}
-                          {holiday.startTime && holiday.endTime
-                            ? `${holiday.startTime}–${holiday.endTime}`
-                            : "All day"}
-                        </span>
-                      </div>
-                      <strong>{formatCalendarEntryDate(holiday)}</strong>
-                    </article>
-                  ))
-                ) : (
-                  <p className="student-holidays-empty">No upcoming holidays are listed yet.</p>
-                )}
-              </div>
-            </section>
 
             <div className="section-title spaced">
               <h3>Today's Agenda</h3>
@@ -7546,7 +7166,7 @@ function TeacherPortal({
                   <strong>
                     Academic City University · {currentFaculty.name} ({currentFaculty.department})
                   </strong>
-                  <span>{currentSemester} · {academicYear} Academic Year</span>
+                  <span>Semester 2 · 2025/2026 Academic Year</span>
                 </div>
                 <button
                   style={{
@@ -7710,10 +7330,10 @@ function TeacherPortal({
                             value={
                               isTeacherRescheduleSelectionAvailable
                                 ? getScheduleSuggestionKey({
-                                    day: teacherNewDay,
-                                    slot: teacherNewSlot,
-                                    roomCode: teacherNewRoom,
-                                  })
+                                  day: teacherNewDay,
+                                  slot: teacherNewSlot,
+                                  roomCode: teacherNewRoom,
+                                })
                                 : ""
                             }
                             onChange={(e) => {
@@ -7735,10 +7355,10 @@ function TeacherPortal({
                                 {teacherOnlineMeeting
                                   ? `${weekDays6[suggestion.day]} · ${getScheduleSuggestionTimeLabel(suggestion, teacherTargetEvent?.span || 1)}`
                                   : getScheduleSuggestionLabel(
-                                      suggestion,
-                                      rooms,
-                                      teacherTargetEvent?.span || 1,
-                                    )}
+                                    suggestion,
+                                    rooms,
+                                    teacherTargetEvent?.span || 1,
+                                  )}
                               </option>
                             ))}
                           </select>
@@ -7799,18 +7419,10 @@ function TeacherPortal({
               </div>
               {teacherCourses.length > 0 ? (
                 teacherCourses.map((course) => (
-                  <div className="table-row" role="row" key={getCourseRecordKey(course)}>
+                  <div className="table-row" role="row" key={course.code}>
                     <span>
                       <b>{course.code}</b>
                       <small>{course.title}</small>
-                      {course.programme && course.level && (
-                        <small>
-                          {ACADEMIC_PROGRAMMES.find(
-                            (programme) => programme.code === course.programme,
-                          )?.name ?? course.programme}{" "}
-                          · Level {course.level}
-                        </small>
-                      )}
                     </span>
                     <span data-label="Department">{course.department}</span>
                     <span data-label="Enrollment / groups">
@@ -7919,25 +7531,8 @@ function TeacherPortal({
           </>
         )}
 
-        {activeTab === "Calendar" && (
-          <>
-            <PageHeading
-              eyebrow="FACULTY PORTAL · ACADEMIC CALENDAR"
-              title="Semester calendar."
-              copy="View Ghana public holidays, semester breaks, vacate dates, and campus events."
-            />
-            <AcademicCalendarView
-              calendar={academicCalendar}
-              entries={calendarEntries}
-              audience="Lecturers"
-              error={calendarError}
-              loading={calendarLoading}
-            />
-          </>
-        )}
-
         {/* =========================================================================
-            TEACHER TAB 6: EXPORT & CALENDAR
+            TEACHER TAB 5: EXPORT & CALENDAR
             ========================================================================= */}
         {activeTab === "Export" && (
           <>
@@ -7948,7 +7543,7 @@ function TeacherPortal({
                     <strong>
                       Academic City University · {currentFaculty.name} ({currentFaculty.department})
                     </strong>
-                    <span>{currentSemester} · {academicYear} Academic Year</span>
+                    <span>Semester 2 · 2025/2026 Academic Year</span>
                   </div>
                   <button
                     type="button"
@@ -7983,7 +7578,7 @@ function TeacherPortal({
             <PageHeading
               eyebrow="FACULTY PORTAL · EXPORT"
               title="Export Your Schedule."
-              copy="Download a print-ready PDF or weekly calendar files for Apple, Google, and Outlook."
+              copy="Download print-ready PDFs, export Apple/Google calendar files, or subscribe to live feeds."
             />
             <div className="export-grid">
               <article>
@@ -8000,21 +7595,23 @@ function TeacherPortal({
               </article>
               <article>
                 <Icon name="calendar-03" />
-                <h3>Apple, Google &amp; Outlook Calendar</h3>
-                <p>
-                  Download one semester-bounded calendar with classes, Ghana public holidays,
-                  mid-semester breaks, and campus events. Open the .ics file in Apple Calendar or
-                  import it into Google Calendar.
-                </p>
-                <CalendarDownloadButton
-                  events={teacherEvents}
-                  calendarEntries={calendarEntries}
-                  calendar={academicCalendar}
-                  audience="Lecturers"
-                  filename="academic-city-teaching-schedule.ics"
-                  calendarName="Academic City Teaching Schedule"
-                  label="Download .ics to open/import"
-                />
+                <h3>iCalendar Sync</h3>
+                <p>Direct .ics file export for Apple Calendar, Outlook, and Google Calendar.</p>
+                <button onClick={() => showAppNotification("Schedule.ics downloaded.", "success")}>
+                  Export .ics <Icon name="download-04" />
+                </button>
+              </article>
+              <article className="calendar-subscribe">
+                <Icon name="link-04" />
+                <h3>Live WebCal Feed</h3>
+                <p>Auto-updating subscription URL for your calendar applications.</p>
+                <button
+                  onClick={() =>
+                    showAppNotification("Live calendar link copied to clipboard.", "success")
+                  }
+                >
+                  Copy WebCal URL <Icon name="copy-01" />
+                </button>
               </article>
             </div>
           </>
@@ -8069,12 +7666,7 @@ function StudentPortal({
   electiveTracks,
   exams,
   demoAccount,
-  academicYear,
   currentSemester,
-  academicCalendar,
-  calendarEntries,
-  calendarLoading,
-  calendarError,
   onLogout,
   onSwitchRole,
 }: {
@@ -8084,12 +7676,7 @@ function StudentPortal({
   electiveTracks: ElectiveTrack[];
   exams: ExamEntry[];
   demoAccount: DemoAccount;
-  academicYear: string;
-  currentSemester: AcademicSemesterName;
-  academicCalendar: AcademicSemesterCalendar;
-  calendarEntries: AcademicCalendarEntry[];
-  calendarLoading: boolean;
-  calendarError: string | null;
+  currentSemester: "Semester 1" | "Semester 2";
   onLogout: () => void;
   onSwitchRole: (r: Role) => void;
 }) {
@@ -8098,7 +7685,6 @@ function StudentPortal({
   const [animKey, setAnimKey] = useState(0);
   const prevIndexRef = useRef(0);
   const timetableRef = useRef<HTMLElement | null>(null);
-  const upcomingHolidays = getUpcomingCalendarEntries(calendarEntries, "Students", 6);
 
   // Student Profile State
   const studentMajor = demoAccount.major ?? "CS";
@@ -8145,48 +7731,48 @@ function StudentPortal({
   const selectedElectiveCourse = selectedElectiveCourses[0];
   const studentElectiveOptions = activeTrack
     ? activeTrackElectiveCourses
-        .filter((course) =>
-          (selectedSemester === 1 ? activeTrack.semester1 : activeTrack.semester2).some(
-            (code) => normalizeCourseIdentifier(code) === normalizeCourseIdentifier(course.code),
-          ),
+      .filter((course) =>
+        (selectedSemester === 1 ? activeTrack.semester1 : activeTrack.semester2).some(
+          (code) => normalizeCourseIdentifier(code) === normalizeCourseIdentifier(course.code),
+        ),
+      )
+      .map((course) => ({
+        ...course,
+        seats: Math.max(8, 50 - course.enrollment),
+        prereqs: course.prerequisites ?? [],
+        semester: activeTrack.semester1.some(
+          (code) => normalizeCourseIdentifier(code) === normalizeCourseIdentifier(course.code),
         )
-        .map((course) => ({
-          ...course,
-          seats: Math.max(8, 50 - course.enrollment),
-          prereqs: course.prerequisites ?? [],
-          semester: activeTrack.semester1.some(
-            (code) => normalizeCourseIdentifier(code) === normalizeCourseIdentifier(course.code),
-          )
-            ? 1
-            : 2,
-        }))
-        .sort((a, b) => a.semester - b.semester)
+          ? 1
+          : 2,
+      }))
+      .sort((a, b) => a.semester - b.semester)
     : [
-        {
-          code: "AI 412",
-          title: "Artificial Intelligence & Robotics",
-          faculty: "Dr. Peter Yamak",
-          credits: 3,
-          seats: 8,
-          prereqs: ["CS 201", "MATH 201"],
-        },
-        {
-          code: "CS/IT 4131",
-          title: "Cloud Application Development",
-          faculty: "Prince Yanum",
-          credits: 3,
-          seats: 12,
-          prereqs: ["CS 301"],
-        },
-        {
-          code: "CS 425",
-          title: "Distributed Systems & Cloud Computing",
-          faculty: "Dr. E. Adjei",
-          credits: 3,
-          seats: 16,
-          prereqs: ["CS 310"],
-        },
-      ];
+      {
+        code: "AI 412",
+        title: "Artificial Intelligence & Robotics",
+        faculty: "Dr. Peter Yamak",
+        credits: 3,
+        seats: 8,
+        prereqs: ["CS 201", "MATH 201"],
+      },
+      {
+        code: "CS/IT 4131",
+        title: "Cloud Application Development",
+        faculty: "Prince Yanum",
+        credits: 3,
+        seats: 12,
+        prereqs: ["CS 301"],
+      },
+      {
+        code: "CS 425",
+        title: "Distributed Systems & Cloud Computing",
+        faculty: "Dr. E. Adjei",
+        credits: 3,
+        seats: 16,
+        prereqs: ["CS 310"],
+      },
+    ];
   const timetableElectiveOptions = studentElectiveOptions.filter((course) => {
     if (
       !enrolledElectiveCodes.some(
@@ -8224,7 +7810,6 @@ function StudentPortal({
   const studentNav = [
     ["Home", "dashboard-square-01"],
     ["Timetable", "calendar-03"],
-    ["Calendar", "calendar-03"],
     ["Courses", "book-open-01"],
     ["Exams", "test-tube-01"],
     ["Export", "download-04"],
@@ -8291,7 +7876,7 @@ function StudentPortal({
           electiveCourse !== undefined &&
           activeTimetableElective !== "core" &&
           normalizeCourseIdentifier(activeTimetableElective) ===
-            normalizeCourseIdentifier(electiveCourse.code)
+          normalizeCourseIdentifier(electiveCourse.code)
         );
       }
 
@@ -8313,7 +7898,7 @@ function StudentPortal({
         !electiveCourse ||
         (activeTimetableElective !== "core" &&
           normalizeCourseIdentifier(activeTimetableElective) ===
-            normalizeCourseIdentifier(electiveCourse.code))
+          normalizeCourseIdentifier(electiveCourse.code))
       );
     });
   }, [
@@ -8376,7 +7961,7 @@ function StudentPortal({
         onLogout={onLogout}
         onSwitchRole={onSwitchRole}
         userName={demoAccount.name}
-        term={`${currentSemester} · ${academicYear}`}
+        term={`${currentSemester} · 2025/26`}
         navItems={studentNav.map(([label, icon]) => ({
           id: label,
           label,
@@ -8388,7 +7973,7 @@ function StudentPortal({
 
       <div key={animKey} className={`portal-content page-slide page-slide--${direction}`}>
         {/* =========================================================================
-            STUDENT TAB 1: HOME (RADAR + ACADEMIC YEAR HOLIDAYS)
+            STUDENT TAB 1: HOME (RADAR + GHANA HOLIDAYS + ACADEMIC STANDING)
             ========================================================================= */}
         {activeTab === "Home" && (
           <>
@@ -8398,44 +7983,118 @@ function StudentPortal({
               copy={`Bachelor of Science in ${studentMajor === "CS" ? "Computer Science" : studentMajor} · Level ${studentLevel} · ${hasCurrentSemesterElectives && activeTrack ? activeTrack.name : "Cohort 1 (September Intake)"}`}
               action={
                 <button className="date-button" onClick={() => navigate("Timetable")}>
-                  <Icon name="calendar-03" /> {currentSemester} · {academicYear}
+                  <Icon name="calendar-03" /> {currentSemester} · 2025/26
                 </button>
               }
             />
 
             <NextClassRadar role="Student" />
 
-            <section className="student-holidays-panel" aria-labelledby="student-holidays-heading">
-              <header className="student-holidays-header">
-                <div>
-                  <span className="student-holidays-eyebrow">
-                    UPCOMING · ACADEMIC CALENDAR
+            {/* Academic Standing & Ghana Statutory Holidays Grid */}
+            <div className="admin-grid" style={{ marginTop: "24px" }}>
+              {/* Academic Standing Card */}
+              <section className="operations">
+                <div className="section-title">
+                  <div>
+                    <span>ACADEMIC INTEGRITY</span>
+                    <h3>Progression & Standing</h3>
+                  </div>
+                  <span className="badge-confirmed">
+                    <Icon name="checkmark-circle-02" /> Good Standing
                   </span>
-                  <h3 id="student-holidays-heading">Holidays &amp; Events</h3>
                 </div>
-                <span className="student-holidays-term">Next 6 dates</span>
-              </header>
-              <div className="student-holidays-list">
-                {upcomingHolidays.length > 0 ? (
-                  upcomingHolidays.map((holiday) => (
-                    <article className="student-holiday" key={holiday.id}>
-                      <div>
-                        <h4>{holiday.title}</h4>
-                        <span>
-                          {holiday.type} ·{" "}
-                          {holiday.startTime && holiday.endTime
-                            ? `${holiday.startTime}–${holiday.endTime}`
-                            : "All day"}
-                        </span>
-                      </div>
-                      <strong>{formatCalendarEntryDate(holiday)}</strong>
-                    </article>
-                  ))
-                ) : (
-                  <p className="student-holidays-empty">No upcoming holidays are listed yet.</p>
-                )}
-              </div>
-            </section>
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 1fr",
+                    gap: "12px",
+                    marginTop: "14px",
+                  }}
+                >
+                  <div
+                    style={{
+                      padding: "12px",
+                      background: "#f8f9fa",
+                      borderRadius: "8px",
+                      border: "1px solid #eee",
+                    }}
+                  >
+                    <span style={{ fontSize: "11px", color: "#666" }}>CUMULATIVE GPA</span>
+                    <strong
+                      style={{
+                        display: "block",
+                        fontSize: "24px",
+                        color: "#166534",
+                        marginTop: "4px",
+                      }}
+                    >
+                      3.72
+                    </strong>
+                    <small style={{ fontSize: "11px", color: "#555" }}>Dean's Honor List</small>
+                  </div>
+                  <div
+                    style={{
+                      padding: "12px",
+                      background: "#f8f9fa",
+                      borderRadius: "8px",
+                      border: "1px solid #eee",
+                    }}
+                  >
+                    <span style={{ fontSize: "11px", color: "#666" }}>DEGREE PROGRESS</span>
+                    <strong
+                      style={{
+                        display: "block",
+                        fontSize: "24px",
+                        color: "#111",
+                        marginTop: "4px",
+                      }}
+                    >
+                      108 / 136
+                    </strong>
+                    <small style={{ fontSize: "11px", color: "#555" }}>Credits Earned</small>
+                  </div>
+                </div>
+                <div style={{ marginTop: "14px", fontSize: "12px", color: "#666" }}>
+                  Course groups are assigned automatically by major for each course. · Progression
+                  Status: <b>Approved</b>
+                </div>
+              </section>
+
+              {/* Ghana Statutory Holidays Widget */}
+              <aside
+                className="attention-card"
+                style={{ background: "#fafafa", border: "1px solid #e0e0e0" }}
+              >
+                <div
+                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
+                >
+                  <span style={{ color: "#000" }}>GHANA STATUTORY HOLIDAYS</span>
+                  <span className="muted-label">Semester 2 Observances</span>
+                </div>
+                <h3 style={{ marginTop: "6px" }}>Campus Holiday Calendar</h3>
+                <div style={{ display: "grid", gap: "8px", marginTop: "12px" }}>
+                  {ghanaHolidays.slice(0, 4).map((h) => (
+                    <div
+                      key={h.name}
+                      style={{
+                        display: "flex",
+                        justifyContent: "space-between",
+                        padding: "6px 8px",
+                        background: "#fff",
+                        border: "1px solid #eee",
+                        borderRadius: "6px",
+                        fontSize: "11.5px",
+                      }}
+                    >
+                      <span>
+                        <strong>{h.name}</strong> ({h.day})
+                      </span>
+                      <b style={{ color: "#000" }}>{h.date}</b>
+                    </div>
+                  ))}
+                </div>
+              </aside>
+            </div>
           </>
         )}
 
@@ -8492,14 +8151,14 @@ function StudentPortal({
                   {activeTrackSchedule.unscheduledCourseCodes.some((code) =>
                     code.endsWith(`Semester ${selectedSemester}`),
                   ) && (
-                    <span className="badge-pending" role="alert">
-                      Could not schedule all sessions for{" "}
-                      {activeTrackSchedule.unscheduledCourseCodes
-                        .filter((code) => code.endsWith(`Semester ${selectedSemester}`))
-                        .join(", ")}
-                      .
-                    </span>
-                  )}
+                      <span className="badge-pending" role="alert">
+                        Could not schedule all sessions for{" "}
+                        {activeTrackSchedule.unscheduledCourseCodes
+                          .filter((code) => code.endsWith(`Semester ${selectedSemester}`))
+                          .join(", ")}
+                        .
+                      </span>
+                    )}
                   <TimetablePdfButton
                     targetRef={timetableRef}
                     filename="academic-city-student-timetable.pdf"
@@ -8523,8 +8182,8 @@ function StudentPortal({
                     {hasCurrentSemesterElectives && isTrackDemo
                       ? `${currentSemester} · 3 core courses + ${selectedSemesterElectives.join(", ")}`
                       : hasCurrentSemesterElectives
-                        ? `${currentSemester} · ${academicYear} Academic Year · Core courses + ${activeTimetableElective === "core" ? "no elective" : (selectedElectiveCourse?.code ?? activeTimetableElective)}`
-                        : `${currentSemester} · ${academicYear} Academic Year · Core courses only`}
+                        ? `${currentSemester} · 2025/2026 Academic Year · Core courses + ${activeTimetableElective === "core" ? "no elective" : (selectedElectiveCourse?.code ?? activeTimetableElective)}`
+                        : `${currentSemester} · 2025/2026 Academic Year · Core courses only`}
                   </span>
                 </div>
               </div>
@@ -8537,25 +8196,8 @@ function StudentPortal({
           </>
         )}
 
-        {activeTab === "Calendar" && (
-          <>
-            <PageHeading
-              eyebrow="STUDENT PORTAL · ACADEMIC CALENDAR"
-              title="Semester calendar."
-              copy="See Ghana public holidays, semester breaks, vacate dates, and campus events."
-            />
-            <AcademicCalendarView
-              calendar={academicCalendar}
-              entries={calendarEntries}
-              audience="Students"
-              error={calendarError}
-              loading={calendarLoading}
-            />
-          </>
-        )}
-
         {/* =========================================================================
-            STUDENT TAB 4: COURSES
+            STUDENT TAB 3: COURSES
             ========================================================================= */}
         {activeTab === "Courses" && (
           <>
@@ -8795,8 +8437,8 @@ function StudentPortal({
                       {hasCurrentSemesterElectives && isTrackDemo
                         ? `${currentSemester} · 3 core courses + ${selectedSemesterElectives.join(", ")}`
                         : hasCurrentSemesterElectives
-                          ? `${currentSemester} · ${academicYear} Academic Year · Core courses + ${activeTimetableElective === "core" ? "no elective" : (selectedElectiveCourse?.code ?? activeTimetableElective)}`
-                          : `${currentSemester} · ${academicYear} Academic Year · Core courses only`}
+                          ? `${currentSemester} · 2025/2026 Academic Year · Core courses + ${activeTimetableElective === "core" ? "no elective" : (selectedElectiveCourse?.code ?? activeTimetableElective)}`
+                          : `${currentSemester} · 2025/2026 Academic Year · Core courses only`}
                     </span>
                   </div>
                 </div>
@@ -8809,7 +8451,7 @@ function StudentPortal({
             <PageHeading
               eyebrow="STUDENT PORTAL · EXPORT"
               title="Export Your Schedule."
-              copy="Download a print-ready timetable PDF or calendar files for your phone and desktop."
+              copy="Download print-ready timetable sheets, iCalendar feeds, or examination hall slips."
             />
             <div className="export-grid">
               <article>
@@ -8827,20 +8469,26 @@ function StudentPortal({
               <article>
                 <Icon name="calendar-03" />
                 <h3>Apple & Google Calendar</h3>
-                <p>
-                  Download classes, Ghana public holidays, semester breaks, and campus events as
-                  one calendar ending with the semester. Open the .ics file in Apple Calendar or
-                  import it into Google Calendar.
-                </p>
-                <CalendarDownloadButton
-                  events={studentEvents}
-                  calendarEntries={calendarEntries}
-                  calendar={academicCalendar}
-                  audience="Students"
-                  filename="academic-city-student-timetable.ics"
-                  calendarName="Academic City Student Timetable"
-                  label="Download .ics to open/import"
-                />
+                <p>Import all classes into your phone or calendar client via .ics file.</p>
+                <button
+                  onClick={() =>
+                    showAppNotification("StudentTimetable.ics downloaded.", "success")
+                  }
+                >
+                  Download .ics <Icon name="download-04" />
+                </button>
+              </article>
+              <article className="calendar-subscribe">
+                <Icon name="link-04" />
+                <h3>Live WebCal Feed</h3>
+                <p>Automatic live schedule updates on your calendar.</p>
+                <button
+                  onClick={() =>
+                    showAppNotification("WebCal subscription link copied to clipboard.", "success")
+                  }
+                >
+                  Copy Subscription URL <Icon name="copy-01" />
+                </button>
               </article>
             </div>
           </>
@@ -8863,203 +8511,17 @@ function StudentPortal({
 export default function App() {
   const [portal, setPortal] = useState<Role | null>("Admin"); // Default to Admin for immediate review
   const [studentDemo, setStudentDemo] = useState<DemoAccount>(demos[0]);
-  const [academicYear, setAcademicYear] = useState("2025/26");
-  const [currentSemester, setCurrentSemester] = useState<AcademicSemesterName>("Semester 1");
+  const [currentSemester, setCurrentSemester] = useState<"Semester 1" | "Semester 2">("Semester 1");
   const [saturdayEnabled, setSaturdayEnabled] = useState(false);
   const [events, setEvents] = useState<TimetableEvent[]>(initialMasterEvents);
-  const eventsRef = useRef(events);
   const [faculty, setFaculty] = useState<FacultyMember[]>(initialFaculty);
   const [rooms, setRooms] = useState<RoomFacility[]>(initialRooms);
   const [courses, setCourses] = useState<CourseData[]>(initialCourses);
-  const [demoStudents, setDemoStudents] = useState<DemoStudentRecord[]>([]);
-  const [demoDataLoading, setDemoDataLoading] = useState(true);
-  const [demoDataError, setDemoDataError] = useState<string | null>(null);
   const [trackElectiveCourses, setTrackElectiveCourses] = useState<CourseData[]>(
     initialTrackElectiveCourses,
   );
   const [electiveTracks, setElectiveTracks] = useState<ElectiveTrack[]>(initialElectiveTracks);
   const [exams, setExams] = useState<ExamEntry[]>(initialExams);
-  const [storedAcademicCalendar, setStoredAcademicCalendar] =
-    useState<AcademicSemesterCalendar | null>(null);
-  const [calendarLoading, setCalendarLoading] = useState(true);
-  const [calendarError, setCalendarError] = useState<string | null>(null);
-  const [calendarEntries, setCalendarEntries] = useState<AcademicCalendarEntry[]>([]);
-  const [holidayLoading, setHolidayLoading] = useState(true);
-  const [holidayError, setHolidayError] = useState<string | null>(null);
-  const [termSettingsLoaded, setTermSettingsLoaded] = useState(false);
-
-  const setConflictCheckedEvents = React.useCallback<
-    React.Dispatch<React.SetStateAction<TimetableEvent[]>>
-  >((update) => {
-    const updatedEvents = typeof update === "function" ? update(eventsRef.current) : update;
-    const conflict = findClassroomTimeConflict(updatedEvents, ONLINE_MEETING_ROOM);
-    if (conflict) {
-      showAppNotification(
-        `${conflict.room} is double-booked by ${conflict.first.code} and ${conflict.second.code}. The timetable was not changed.`,
-        "error",
-      );
-      return;
-    }
-
-    eventsRef.current = updatedEvents;
-    setEvents(updatedEvents);
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-    loadOrSeedDemoDataset(
-      {
-        faculty: initialFaculty,
-        courses: initialCourses,
-        events: initialMasterEvents,
-        rooms: initialRooms,
-      },
-      trackCoreEventsSemester1,
-    )
-      .then((dataset) => {
-        if (!active) return;
-        setFaculty(dataset.faculty);
-        setDemoStudents(dataset.students);
-        setCourses(dataset.courses);
-        setConflictCheckedEvents(dataset.events);
-        setRooms(dataset.rooms);
-        setDemoDataError(null);
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          setDemoDataError(error instanceof Error ? error.message : String(error));
-        }
-      })
-      .finally(() => {
-        if (active) setDemoDataLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [setConflictCheckedEvents]);
-
-  useEffect(() => {
-    if (demoDataLoading || demoStudents.length === 0) return;
-
-    const roomConflict = findClassroomTimeConflict(events, ONLINE_MEETING_ROOM);
-    if (roomConflict) {
-      setDemoDataError(
-        `${roomConflict.room} is double-booked by ${roomConflict.first.code} and ${roomConflict.second.code}.`,
-      );
-      return;
-    }
-
-    const dataset = {
-      faculty,
-      students: demoStudents,
-      courses,
-      events,
-      rooms,
-    };
-    saveDemoDataset(dataset)
-      .then(() => setDemoDataError(null))
-      .catch((error: unknown) => {
-        setDemoDataError(error instanceof Error ? error.message : String(error));
-      });
-  }, [demoDataLoading, demoStudents, courses, events, faculty, rooms]);
-
-  useEffect(() => {
-    let active = true;
-    loadActiveAcademicTerm()
-      .then((term) => {
-        if (!active || !term) return;
-        setAcademicYear(term.academicYear);
-        setCurrentSemester(term.semester);
-      })
-      .catch((error: unknown) => {
-        if (active) setCalendarError(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => {
-        if (active) setTermSettingsLoaded(true);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!termSettingsLoaded) return;
-    let active = true;
-    setCalendarLoading(true);
-    setCalendarError(null);
-    loadSemesterCalendar(academicYear, currentSemester)
-      .then((savedCalendar) => {
-        if (!active) return;
-        setStoredAcademicCalendar(
-          savedCalendar ?? createEmptySemesterCalendar(academicYear, currentSemester),
-        );
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        setCalendarError(error instanceof Error ? error.message : String(error));
-        setStoredAcademicCalendar(createEmptySemesterCalendar(academicYear, currentSemester));
-      })
-      .finally(() => {
-        if (active) setCalendarLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [academicYear, currentSemester, termSettingsLoaded]);
-
-  useEffect(() => {
-    if (!termSettingsLoaded) return;
-    saveActiveAcademicTerm(academicYear, currentSemester).catch((error: unknown) => {
-      setCalendarError(error instanceof Error ? error.message : String(error));
-    });
-  }, [academicYear, currentSemester, termSettingsLoaded]);
-
-  const activeCalendarKey = getSemesterCalendarKey(academicYear, currentSemester);
-  const academicCalendar = useMemo(
-    () =>
-      storedAcademicCalendar?.key === activeCalendarKey
-        ? storedAcademicCalendar
-        : createEmptySemesterCalendar(academicYear, currentSemester),
-    [activeCalendarKey, academicYear, currentSemester, storedAcademicCalendar],
-  );
-  useEffect(() => {
-    if (!termSettingsLoaded) return;
-    let active = true;
-    setHolidayLoading(true);
-    setHolidayError(null);
-    getSemesterCalendarEntries(academicCalendar)
-      .then((entries) => {
-        if (active) setCalendarEntries(entries);
-      })
-      .catch((error: unknown) => {
-        if (!active) return;
-        setCalendarEntries(academicCalendar.entries);
-        const detail = error instanceof Error ? error.message : String(error);
-        setHolidayError(`Ghana public holidays could not be loaded: ${detail}`);
-      })
-      .finally(() => {
-        if (active) setHolidayLoading(false);
-      });
-
-    return () => {
-      active = false;
-    };
-  }, [academicCalendar, termSettingsLoaded]);
-  const handleSaveAcademicCalendar = async (calendar: AcademicSemesterCalendar) => {
-    const updatedCalendar = {
-      ...calendar,
-      academicYear: calendar.academicYear.trim(),
-      key: getSemesterCalendarKey(calendar.academicYear, calendar.semester),
-    };
-    await saveSemesterCalendar(updatedCalendar);
-    setStoredAcademicCalendar(updatedCalendar);
-    setAcademicYear(updatedCalendar.academicYear);
-    setCurrentSemester(updatedCalendar.semester);
-    setCalendarError(null);
-  };
 
   if (!portal) {
     return (
@@ -9079,7 +8541,7 @@ export default function App() {
     return (
       <AdminPortal
         events={events}
-        setEvents={setConflictCheckedEvents}
+        setEvents={setEvents}
         faculty={faculty}
         setFaculty={setFaculty}
         rooms={rooms}
@@ -9092,18 +8554,8 @@ export default function App() {
         setElectiveTracks={setElectiveTracks}
         exams={exams}
         setExams={setExams}
-        academicYear={academicYear}
-        setAcademicYear={setAcademicYear}
         currentSemester={currentSemester}
         setCurrentSemester={setCurrentSemester}
-        academicCalendar={academicCalendar}
-        calendarEntries={calendarEntries}
-        calendarLoading={calendarLoading || holidayLoading}
-        calendarError={calendarError ?? holidayError}
-        onSaveAcademicCalendar={handleSaveAcademicCalendar}
-        demoStudentCount={demoStudents.length}
-        demoDataLoading={demoDataLoading}
-        demoDataError={demoDataError}
         saturdayEnabled={saturdayEnabled}
         setSaturdayEnabled={setSaturdayEnabled}
         onLogout={() => setPortal(null)}
@@ -9116,17 +8568,11 @@ export default function App() {
     return (
       <TeacherPortal
         events={events}
-        setEvents={setConflictCheckedEvents}
+        setEvents={setEvents}
         faculty={faculty}
         setFaculty={setFaculty}
         rooms={rooms}
         courses={courses}
-        academicYear={academicYear}
-        currentSemester={currentSemester}
-        academicCalendar={academicCalendar}
-        calendarEntries={calendarEntries}
-        calendarLoading={calendarLoading || holidayLoading}
-        calendarError={calendarError ?? holidayError}
         saturdayEnabled={saturdayEnabled}
         onLogout={() => setPortal(null)}
         onSwitchRole={(r) => setPortal(r)}
@@ -9142,12 +8588,7 @@ export default function App() {
       electiveTracks={electiveTracks}
       exams={exams}
       demoAccount={studentDemo}
-      academicYear={academicYear}
       currentSemester={currentSemester}
-      academicCalendar={academicCalendar}
-      calendarEntries={calendarEntries}
-      calendarLoading={calendarLoading || holidayLoading}
-      calendarError={calendarError ?? holidayError}
       onLogout={() => setPortal(null)}
       onSwitchRole={(r) => setPortal(r)}
     />
