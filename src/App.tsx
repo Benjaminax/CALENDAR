@@ -2522,7 +2522,15 @@ function Header({
           </button>
 
           <div className="portal-brand-wrap">
-            <UniversityLogo compact />
+            <button
+              type="button"
+              className="portal-brand-btn"
+              onClick={() => window.location.reload()}
+              title="Reload page"
+              aria-label="Academic City University - Reload page"
+            >
+              <UniversityLogo compact />
+            </button>
           </div>
 
           <div className="header-sep" />
@@ -2577,7 +2585,15 @@ function Header({
           >
             <div className="mobile-drawer-top">
               <div className="mobile-drawer-brand">
-                <UniversityLogo compact />
+                <button
+                  type="button"
+                  className="portal-brand-btn"
+                  onClick={() => window.location.reload()}
+                  title="Reload page"
+                  aria-label="Academic City University - Reload page"
+                >
+                  <UniversityLogo compact />
+                </button>
                 <span className="header-role-badge">{meta.badge}</span>
               </div>
               <button
@@ -2718,7 +2734,15 @@ function Login({ onSuccess }: { onSuccess: (role: Role, email: string) => void }
 
       <div className="login-panel">
         <div className="login-wrap">
-          <UniversityLogo className="login-logo" />
+          <button
+            type="button"
+            className="portal-brand-btn"
+            onClick={() => window.location.reload()}
+            title="Reload page"
+            aria-label="Academic City University - Reload page"
+          >
+            <UniversityLogo className="login-logo" />
+          </button>
           <div className="login-header" style={{ margin: "20px 0 16px" }}>
             <h2 style={{ fontSize: "24px", fontWeight: 700, margin: "0 0 6px" }}>
               Timetabling Platform
@@ -2934,7 +2958,13 @@ function AdminPortal({
   onLogout: () => void;
   onSwitchRole: (r: Role) => void;
 }) {
-  const [activeTab, setActiveTab] = useState("Overview");
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      return sessionStorage.getItem("ac_active_tab_Admin") || "Overview";
+    } catch {
+      return "Overview";
+    }
+  });
   const [direction, setDirection] = useState<"left" | "right">("right");
   const [animKey, setAnimKey] = useState(0);
   const prevIndexRef = useRef(0);
@@ -3149,11 +3179,24 @@ function AdminPortal({
     setDirection(dir);
     setAnimKey((k) => k + 1);
     prevIndexRef.current = nextIndex >= 0 ? nextIndex : prevIndexRef.current;
+    try {
+      sessionStorage.setItem("ac_active_tab_Admin", label);
+    } catch {}
     setActiveTab(label);
     window.scrollTo({ top: 0, left: 0, behavior: "smooth" });
     document.documentElement.scrollTo({ top: 0, left: 0, behavior: "smooth" });
     document.body.scrollTo({ top: 0, left: 0, behavior: "smooth" });
   };
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("ac_active_tab_Admin", activeTab);
+    } catch {}
+    const idx = adminNav.findIndex(([l]) => l === activeTab);
+    if (idx >= 0) {
+      prevIndexRef.current = idx;
+    }
+  }, [activeTab]);
 
   const getAdminScheduleSuggestions = (event: TimetableEvent, onlineMeeting = false) => {
     const lecturer = faculty.find((member) => member.name === event.person);
@@ -6764,7 +6807,13 @@ function TeacherPortal({
   onLogout: () => void;
   onSwitchRole: (r: Role) => void;
 }) {
-  const [activeTab, setActiveTab] = useState("Home");
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      return sessionStorage.getItem("ac_active_tab_Teacher") || "Home";
+    } catch {
+      return "Home";
+    }
+  });
   const [direction, setDirection] = useState<"left" | "right">("right");
   const [animKey, setAnimKey] = useState(0);
   const prevIndexRef = useRef(0);
@@ -6845,11 +6894,24 @@ function TeacherPortal({
     setDirection(dir);
     setAnimKey((k) => k + 1);
     prevIndexRef.current = nextIndex >= 0 ? nextIndex : prevIndexRef.current;
+    try {
+      sessionStorage.setItem("ac_active_tab_Teacher", label);
+    } catch {}
     setActiveTab(label);
     window.scrollTo({ top: 0, left: 0, behavior: "smooth" });
     document.documentElement.scrollTo({ top: 0, left: 0, behavior: "smooth" });
     document.body.scrollTo({ top: 0, left: 0, behavior: "smooth" });
   };
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("ac_active_tab_Teacher", activeTab);
+    } catch {}
+    const idx = teacherNav.findIndex(([l]) => l === activeTab);
+    if (idx >= 0) {
+      prevIndexRef.current = idx;
+    }
+  }, [activeTab]);
 
   const handleOpenTeacherReschedule = (event: TimetableEvent) => {
     const onlineMeeting = event.onlineMeeting === true;
@@ -7665,7 +7727,13 @@ function StudentPortal({
   onLogout: () => void;
   onSwitchRole: (r: Role) => void;
 }) {
-  const [activeTab, setActiveTab] = useState("Home");
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      return sessionStorage.getItem("ac_active_tab_Student") || "Home";
+    } catch {
+      return "Home";
+    }
+  });
   const [direction, setDirection] = useState<"left" | "right">("right");
   const [animKey, setAnimKey] = useState(0);
   const prevIndexRef = useRef(0);
@@ -7806,11 +7874,24 @@ function StudentPortal({
     setDirection(dir);
     setAnimKey((k) => k + 1);
     prevIndexRef.current = nextIndex >= 0 ? nextIndex : prevIndexRef.current;
+    try {
+      sessionStorage.setItem("ac_active_tab_Student", label);
+    } catch {}
     setActiveTab(label);
     window.scrollTo({ top: 0, left: 0, behavior: "smooth" });
     document.documentElement.scrollTo({ top: 0, left: 0, behavior: "smooth" });
     document.body.scrollTo({ top: 0, left: 0, behavior: "smooth" });
   };
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("ac_active_tab_Student", activeTab);
+    } catch {}
+    const idx = studentNav.findIndex(([l]) => l === activeTab);
+    if (idx >= 0) {
+      prevIndexRef.current = idx;
+    }
+  }, [activeTab]);
 
   // Apply major-specific split groups and show only the student's selected electives.
   const studentEvents = useMemo(() => {
@@ -8493,28 +8574,131 @@ function StudentPortal({
 // MAIN APP COMPONENT (ROUTER & ROOT STATE)
 // ============================================================================
 
+function usePersistentState<T>(
+  key: string,
+  initialValue: T,
+): [T, React.Dispatch<React.SetStateAction<T>>] {
+  const [state, setState] = useState<T>(() => {
+    try {
+      const item = localStorage.getItem(key);
+      if (item !== null) {
+        return JSON.parse(item) as T;
+      }
+    } catch (e) {
+      console.warn(`Error reading localStorage key "${key}":`, e);
+    }
+    return initialValue;
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(key, JSON.stringify(state));
+    } catch (e) {
+      console.warn(`Error writing to localStorage key "${key}":`, e);
+    }
+  }, [key, state]);
+
+  return [state, setState];
+}
+
 export default function App() {
-  const [portal, setPortal] = useState<Role | null>("Admin"); // Default to Admin for immediate review
-  const [studentDemo, setStudentDemo] = useState<DemoAccount>(demos[0]);
-  const [currentSemester, setCurrentSemester] = useState<"Semester 1" | "Semester 2">("Semester 1");
-  const [saturdayEnabled, setSaturdayEnabled] = useState(false);
-  const [events, setEvents] = useState<TimetableEvent[]>(initialMasterEvents);
-  const [faculty, setFaculty] = useState<FacultyMember[]>(initialFaculty);
-  const [rooms, setRooms] = useState<RoomFacility[]>(initialRooms);
-  const [courses, setCourses] = useState<CourseData[]>(initialCourses);
-  const [trackElectiveCourses, setTrackElectiveCourses] = useState<CourseData[]>(
+  const [portal, setPortal] = useState<Role | null>(() => {
+    try {
+      const saved = sessionStorage.getItem("ac_active_session_role");
+      if (saved === "Admin" || saved === "Teacher" || saved === "Student") {
+        return saved as Role;
+      }
+    } catch (e) {
+      console.warn("Error reading session role:", e);
+    }
+    return null;
+  });
+
+  const [studentDemo, setStudentDemo] = useState<DemoAccount>(() => {
+    try {
+      const savedEmail = sessionStorage.getItem("ac_active_student_email");
+      if (savedEmail) {
+        const found = demos.find((d) => d.role === "Student" && d.email === savedEmail);
+        if (found) return found;
+      }
+    } catch (e) {
+      console.warn("Error reading student session:", e);
+    }
+    return demos[0];
+  });
+
+  const [currentSemester, setCurrentSemester] = usePersistentState<"Semester 1" | "Semester 2">(
+    "ac_current_semester",
+    "Semester 1",
+  );
+  const [saturdayEnabled, setSaturdayEnabled] = usePersistentState<boolean>(
+    "ac_saturday_enabled",
+    false,
+  );
+  const [events, setEvents] = usePersistentState<TimetableEvent[]>(
+    "ac_master_events",
+    initialMasterEvents,
+  );
+  const [faculty, setFaculty] = usePersistentState<FacultyMember[]>(
+    "ac_faculty",
+    initialFaculty,
+  );
+  const [rooms, setRooms] = usePersistentState<RoomFacility[]>(
+    "ac_rooms",
+    initialRooms,
+  );
+  const [courses, setCourses] = usePersistentState<CourseData[]>(
+    "ac_courses",
+    initialCourses,
+  );
+  const [trackElectiveCourses, setTrackElectiveCourses] = usePersistentState<CourseData[]>(
+    "ac_track_elective_courses",
     initialTrackElectiveCourses,
   );
-  const [electiveTracks, setElectiveTracks] = useState<ElectiveTrack[]>(initialElectiveTracks);
-  const [exams, setExams] = useState<ExamEntry[]>(initialExams);
+  const [electiveTracks, setElectiveTracks] = usePersistentState<ElectiveTrack[]>(
+    "ac_elective_tracks",
+    initialElectiveTracks,
+  );
+  const [exams, setExams] = usePersistentState<ExamEntry[]>(
+    "ac_exams",
+    initialExams,
+  );
+
+  const handleLogout = () => {
+    try {
+      sessionStorage.removeItem("ac_active_session_role");
+      sessionStorage.removeItem("ac_active_student_email");
+      sessionStorage.removeItem("ac_active_tab_Admin");
+      sessionStorage.removeItem("ac_active_tab_Teacher");
+      sessionStorage.removeItem("ac_active_tab_Student");
+    } catch (e) {
+      console.warn("Error during logout:", e);
+    }
+    setPortal(null);
+  };
+
+  const handleSwitchRole = (r: Role) => {
+    try {
+      sessionStorage.setItem("ac_active_session_role", r);
+    } catch (e) {
+      console.warn("Error switching role:", e);
+    }
+    setPortal(r);
+  };
 
   if (!portal) {
     return (
       <Login
         onSuccess={(role, email) => {
-          if (role === "Student") {
-            const selectedDemo = demos.find((demo) => demo.role === role && demo.email === email);
-            setStudentDemo(selectedDemo ?? demos[0]);
+          try {
+            sessionStorage.setItem("ac_active_session_role", role);
+            if (role === "Student") {
+              sessionStorage.setItem("ac_active_student_email", email);
+              const selectedDemo = demos.find((demo) => demo.role === role && demo.email === email);
+              setStudentDemo(selectedDemo ?? demos[0]);
+            }
+          } catch (e) {
+            console.warn("Error during login save:", e);
           }
           setPortal(role);
         }}
@@ -8543,8 +8727,8 @@ export default function App() {
         setCurrentSemester={setCurrentSemester}
         saturdayEnabled={saturdayEnabled}
         setSaturdayEnabled={setSaturdayEnabled}
-        onLogout={() => setPortal(null)}
-        onSwitchRole={(r) => setPortal(r)}
+        onLogout={handleLogout}
+        onSwitchRole={handleSwitchRole}
       />
     );
   }
@@ -8559,8 +8743,8 @@ export default function App() {
         rooms={rooms}
         courses={courses}
         saturdayEnabled={saturdayEnabled}
-        onLogout={() => setPortal(null)}
-        onSwitchRole={(r) => setPortal(r)}
+        onLogout={handleLogout}
+        onSwitchRole={handleSwitchRole}
       />
     );
   }
@@ -8574,8 +8758,8 @@ export default function App() {
       exams={exams}
       demoAccount={studentDemo}
       currentSemester={currentSemester}
-      onLogout={() => setPortal(null)}
-      onSwitchRole={(r) => setPortal(r)}
+      onLogout={handleLogout}
+      onSwitchRole={handleSwitchRole}
     />
   );
 }

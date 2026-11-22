@@ -557,6 +557,26 @@ button:disabled {
   display: flex;
   align-items: center;
 }
+.portal-brand-btn {
+  background: transparent;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  outline: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  transition: opacity 0.15s ease, transform 0.1s ease;
+}
+.portal-brand-btn:hover {
+  opacity: 0.85;
+}
+.portal-brand-btn:active {
+  transform: scale(0.98);
+}
 .portal-header-left .university-logo {
   width: 130px;
   height: auto;
